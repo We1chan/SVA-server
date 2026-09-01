@@ -1158,6 +1158,37 @@ namespace SVAAnalyzer
 			}
 		}
 
+		void ensureLegacyDwellBehaviorRule()
+		{
+			if (!dwellEnabled)
+			{
+				return;
+			}
+
+			for (size_t i = 0; i < behaviorRules.size(); ++i)
+			{
+				if (behaviorRules[i].enabled && behaviorRules[i].behaviorType == "dwell")
+				{
+					return;
+				}
+			}
+
+			BehaviorRuleConfig legacyRule;
+			legacyRule.id = "legacy_dwell";
+			legacyRule.name = "legacy_dwell";
+			legacyRule.behaviorType = "dwell";
+			legacyRule.geometryType = "region";
+			const RegionConfig *primaryRegion = findPrimaryRegion();
+			if (primaryRegion)
+			{
+				legacyRule.geometryId = primaryRegion->id;
+			}
+			legacyRule.ruleObjectCode = !objectCodes.empty() ? objectCodes[0] : objectCode;
+			legacyRule.thresholdMs = dwellThresholdMs > 0 ? dwellThresholdMs : 5000;
+			behaviorRules.push_back(legacyRule);
+			normalizeBehaviorRulesConfig();
+		}
+
 		const std::vector<double> &getPrimaryRegionPolygonD() const
 		{
 			const RegionConfig *primaryRegion = findPrimaryRegion();
@@ -1407,6 +1438,7 @@ namespace SVAAnalyzer
 			}
 
 			normalizeBehaviorRulesConfig();
+			ensureLegacyDwellBehaviorRule();
 
 			if (wsEventRuleMode != "any" && wsEventRuleMode != "all_algorithms_per_class" && wsEventRuleMode != "all_algorithms_any_class")
 			{

@@ -62,3 +62,11 @@ endif()
 target_link_libraries(Analyzer ${OpenCV_LIBS})
 target_link_libraries(Analyzer event curl crypto jsoncpp avformat avcodec avutil swscale swresample pthread)
 target_link_libraries(Analyzer onnxruntime) #onnxruntime
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(ControlLegacyDwellTest tests/ControlLegacyDwellTest.cpp)
+  target_include_directories(ControlLegacyDwellTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Analyzer/Core)
+  target_link_libraries(ControlLegacyDwellTest ${OpenCV_LIBS} jsoncpp)
+  add_test(NAME ControlLegacyDwellTest COMMAND ControlLegacyDwellTest)
+endif()
