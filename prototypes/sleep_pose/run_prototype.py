@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from sleep_logic import SleepState, SleepStateMachine, estimate_head_pose
+from sleep_logic import PoseActivityTracker, SleepState, SleepStateMachine, estimate_head_pose
 
 
 STATE_COLORS = {
@@ -33,11 +33,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--confidence", type=float, default=0.35)
     parser.add_argument("--keypoint-confidence", type=float, default=0.35)
-    parser.add_argument("--pitch-threshold-deg", type=float, default=18.0)
+    parser.add_argument("--pitch-threshold-deg", type=float, default=28.0)
+    parser.add_argument("--max-head-offset-deg", type=float, default=50.0)
+    parser.add_argument("--desk-rest-face-ratio", type=float, default=0.04)
+    parser.add_argument("--desk-rest-wrist-ratio", type=float, default=0.35)
+    parser.add_argument("--activity-window-seconds", type=float, default=3.0)
+    parser.add_argument("--activity-threshold", type=float, default=0.18, help="maximum elbow/wrist travel in shoulder-width units")
+    parser.add_argument("--disable-motion-gate", action="store_true", help="use head geometry without the inactivity check")
     parser.add_argument("--sleep-seconds", type=float, default=5.0)
-    parser.add_argument("--recovery-seconds", type=float, default=1.5)
+    parser.add_argument("--recovery-seconds", type=float, default=2.0)
+    parser.add_argument("--start-seconds", type=float, default=0.0, help="seek to this source timestamp before processing")
+    parser.add_argument("--duration-seconds", type=float, default=0.0, help="0 means process until the end")
     parser.add_argument("--frame-stride", type=int, default=1, help="run inference every Nth source frame")
     parser.add_argument("--max-frames", type=int, default=0, help="0 means the complete video")
+    parser.add_argument("--no-video", action="store_true", help="skip overlay rendering and video encoding")
     parser.add_argument("--show", action="store_true")
     return parser.parse_args()
 
@@ -78,6 +87,12 @@ def main() -> int:
         raise FileNotFoundError(f"video not found: {source}")
     if args.frame_stride <= 0:
         raise ValueError("frame stride must be positive")
+    if args.start_seconds < 0 or args.duration_seconds < 0:
+        raise ValueError("start and duration must not be negative")
+    if args.activity_window_seconds <= 0:
+        raise ValueError("activity window must be positive")
+    if args.max_head_offset_deg <= 0:
+        raise ValueError("maximum head offset must be positive")
 
     model = YOLO(args.model)
     capture = cv2.VideoCapture(str(source))
@@ -88,23 +103,37 @@ def main() -> int:
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    start_frame = min(total_frames, int(round(args.start_seconds * fps)))
+    if start_frame > 0:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     output_fps = fps / args.frame_stride
-    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (width, height))
-    if not writer.isOpened():
-        raise RuntimeError(f"cannot create output video: {video_path}")
+    writer = None
+    if not args.no_video:
+        writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"cannot create output video: {video_path}")
 
     state_machine = SleepStateMachine(
         sleep_duration_ms=max(1, int(args.sleep_seconds * 1000)),
         recovery_duration_ms=max(1, int(args.recovery_seconds * 1000)),
     )
+    activity_tracker = PoseActivityTracker(
+        window_ms=max(1, int(args.activity_window_seconds * 1000)),
+        min_history_ms=max(1, int(args.activity_window_seconds * 500)),
+        min_confidence=args.keypoint_confidence,
+        inactivity_threshold=args.activity_threshold,
+    )
     state_counts: Counter[str] = Counter()
     invalid_reasons: Counter[str] = Counter()
     sleep_events = 0
     observed_tracks: set[int] = set()
-    source_frame_index = 0
+    source_frame_index = start_frame
     processed_frames = 0
     valid_pose_observations = 0
     low_head_observations = 0
+    activity_valid_observations = 0
+    inactive_observations = 0
+    sleep_signal_observations = 0
     inference_ms_total = 0.0
     started = time.perf_counter()
 
@@ -116,6 +145,8 @@ def main() -> int:
                     break
                 current_frame_index = source_frame_index
                 source_frame_index += 1
+                if args.duration_seconds > 0 and current_frame_index >= start_frame + int(round(args.duration_seconds * fps)):
+                    break
                 if current_frame_index % args.frame_stride != 0:
                     continue
                 if args.max_frames > 0 and processed_frames >= args.max_frames:
@@ -133,7 +164,8 @@ def main() -> int:
                     verbose=False,
                 )[0]
                 inference_ms_total += (time.perf_counter() - infer_started) * 1000.0
-                annotated = result.plot(labels=False, conf=False)
+                render_frame = writer is not None or args.show
+                annotated = result.plot(labels=False, conf=False) if render_frame else None
                 seen_this_frame: set[int] = set()
 
                 if result.boxes is not None and result.keypoints is not None:
@@ -150,28 +182,51 @@ def main() -> int:
                             person_keypoints,
                             min_confidence=args.keypoint_confidence,
                             pitch_threshold_deg=args.pitch_threshold_deg,
+                            max_head_offset_deg=args.max_head_offset_deg,
+                            desk_rest_face_ratio=args.desk_rest_face_ratio,
+                            desk_rest_wrist_ratio=args.desk_rest_wrist_ratio,
                         )
+                        activity = activity_tracker.update(track_id, timestamp_ms, person_keypoints)
+                        if activity.valid:
+                            activity_valid_observations += 1
+                            if activity.inactive:
+                                inactive_observations += 1
+                        sleep_signal = evidence.low_head
+                        motion_gate_applied = (
+                            not args.disable_motion_gate
+                            and activity.valid
+                            and evidence.posture_mode != "desk_rest"
+                        )
+                        if motion_gate_applied:
+                            sleep_signal = sleep_signal and activity.inactive
+                        if sleep_signal:
+                            sleep_signal_observations += 1
                         if evidence.valid:
                             valid_pose_observations += 1
                             if evidence.low_head:
                                 low_head_observations += 1
                         else:
                             invalid_reasons[evidence.reason] += 1
-                        update = state_machine.update(track_id, timestamp_ms, evidence.low_head if evidence.valid else None)
+                        update = state_machine.update(track_id, timestamp_ms, sleep_signal if evidence.valid else None)
                         state_counts[update.state.value] += 1
                         if update.sleep_event:
                             sleep_events += 1
 
                         pitch_text = f"pitch={evidence.pitch_proxy_deg:.1f}deg" if evidence.pitch_proxy_deg is not None else "pitch=n/a"
                         low_text = "LOW_HEAD" if evidence.low_head else ("HEAD_OK" if evidence.valid else "POSE_INVALID")
+                        if activity.score is None:
+                            activity_text = "activity=n/a"
+                        else:
+                            activity_text = f"activity={activity.score:.2f} {'INACTIVE' if activity.inactive else 'ACTIVE'}"
                         color = STATE_COLORS[update.state]
-                        _draw_label(
-                            annotated,
-                            int(box[0]),
-                            int(box[1]),
-                            [f"ID {track_id} {update.state.value}", f"{pitch_text} {low_text}"],
-                            color,
-                        )
+                        if annotated is not None:
+                            _draw_label(
+                                annotated,
+                                int(box[0]),
+                                int(box[1]),
+                                [f"ID {track_id} {update.state.value}", f"{evidence.posture_mode} {pitch_text} {low_text}", activity_text],
+                                color,
+                            )
 
                         row = {
                             "frame": current_frame_index,
@@ -185,14 +240,24 @@ def main() -> int:
                             "low_head": evidence.low_head,
                             "pitch_proxy_deg": None if evidence.pitch_proxy_deg is None else round(evidence.pitch_proxy_deg, 3),
                             "head_offset_deg": None if evidence.head_offset_deg is None else round(evidence.head_offset_deg, 3),
+                            "posture_mode": evidence.posture_mode,
+                            "face_below_shoulder_ratio": None if evidence.face_below_shoulder_ratio is None else round(evidence.face_below_shoulder_ratio, 4),
+                            "head_to_wrist_ratio": None if evidence.head_to_wrist_ratio is None else round(evidence.head_to_wrist_ratio, 4),
+                            "activity_score": None if activity.score is None else round(activity.score, 4),
+                            "activity_valid": activity.valid,
+                            "inactive": activity.inactive,
+                            "sleep_signal": sleep_signal,
+                            "motion_gate_applied": motion_gate_applied,
                             "pose_confidence": round(evidence.confidence, 3),
                             "invalid_reason": evidence.reason,
                         }
                         event_stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
                 state_machine.prune(timestamp_ms)
-                writer.write(annotated)
-                if args.show:
+                activity_tracker.prune(timestamp_ms)
+                if writer is not None and annotated is not None:
+                    writer.write(annotated)
+                if args.show and annotated is not None:
                     cv2.imshow("sleep-pose prototype", annotated)
                     if cv2.waitKey(1) & 0xFF == 27:
                         break
@@ -201,7 +266,8 @@ def main() -> int:
                     print(f"processed {processed_frames} frames (source frame {current_frame_index})", flush=True)
     finally:
         capture.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
         cv2.destroyAllWindows()
 
     elapsed_seconds = time.perf_counter() - started
@@ -211,6 +277,8 @@ def main() -> int:
         "device": args.device,
         "source_frames": total_frames,
         "processed_frames": processed_frames,
+        "start_seconds": args.start_seconds,
+        "duration_seconds": args.duration_seconds,
         "frame_stride": args.frame_stride,
         "source_fps": round(fps, 3),
         "output_fps": round(output_fps, 3),
@@ -224,17 +292,26 @@ def main() -> int:
             "valid": valid_pose_observations,
             "invalid": sum(invalid_reasons.values()),
             "low_head": low_head_observations,
+            "activity_valid": activity_valid_observations,
+            "inactive": inactive_observations,
+            "sleep_signal": sleep_signal_observations,
             "invalid_reasons": dict(invalid_reasons),
         },
         "thresholds": {
             "detection_confidence": args.confidence,
             "keypoint_confidence": args.keypoint_confidence,
             "pitch_threshold_deg": args.pitch_threshold_deg,
+            "max_head_offset_deg": args.max_head_offset_deg,
+            "desk_rest_face_ratio": args.desk_rest_face_ratio,
+            "desk_rest_wrist_ratio": args.desk_rest_wrist_ratio,
+            "activity_window_seconds": args.activity_window_seconds,
+            "activity_threshold": args.activity_threshold,
+            "motion_gate_enabled": not args.disable_motion_gate,
             "sleep_seconds": args.sleep_seconds,
             "recovery_seconds": args.recovery_seconds,
         },
         "outputs": {
-            "video": str(video_path),
+            "video": None if writer is None else str(video_path),
             "frames_jsonl": str(events_path),
         },
     }

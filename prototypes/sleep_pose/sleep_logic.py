@@ -8,6 +8,7 @@ person scale therefore still require threshold calibration.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 import math
@@ -24,6 +25,10 @@ class CocoKeypoint(IntEnum):
     RIGHT_EAR = 4
     LEFT_SHOULDER = 5
     RIGHT_SHOULDER = 6
+    LEFT_ELBOW = 7
+    RIGHT_ELBOW = 8
+    LEFT_WRIST = 9
+    RIGHT_WRIST = 10
 
 
 class SleepState(str, Enum):
@@ -41,6 +46,17 @@ class PoseEvidence:
     head_offset_deg: Optional[float]
     shoulder_width_px: Optional[float]
     confidence: float
+    reason: str = ""
+    posture_mode: str = "unknown"
+    face_below_shoulder_ratio: Optional[float] = None
+    head_to_wrist_ratio: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class ActivityEvidence:
+    valid: bool
+    score: Optional[float]
+    inactive: bool
     reason: str = ""
 
 
@@ -74,7 +90,10 @@ def estimate_head_pose(
     keypoints: np.ndarray,
     *,
     min_confidence: float = 0.35,
-    pitch_threshold_deg: float = 18.0,
+    pitch_threshold_deg: float = 28.0,
+    max_head_offset_deg: float = 50.0,
+    desk_rest_face_ratio: float = 0.04,
+    desk_rest_wrist_ratio: float = 0.35,
 ) -> PoseEvidence:
     """Estimate a camera-relative head-down signal from 17 COCO keypoints.
 
@@ -110,25 +129,174 @@ def estimate_head_pose(
     shoulder_mid = (left_shoulder[:2] + right_shoulder[:2]) / 2.0
     shoulder_width = float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2]))
     vertical_span = float(shoulder_mid[1] - face_anchor[1])
-    if shoulder_width < 8.0 or vertical_span < 8.0:
+    if shoulder_width < 8.0:
         return PoseEvidence(False, False, None, None, shoulder_width, 0.0, "pose geometry is too small or inverted")
 
-    nose_drop = float(nose[1] - face_anchor[1])
-    pitch_proxy_deg = math.degrees(math.atan2(nose_drop, vertical_span))
+    face_below_shoulder_ratio = float((face_anchor[1] - shoulder_mid[1]) / shoulder_width)
+    visible_wrists = [
+        points[index]
+        for index in (CocoKeypoint.LEFT_WRIST, CocoKeypoint.RIGHT_WRIST)
+        if points[index, 2] >= min_confidence
+    ]
+    head_to_wrist_ratio = None
+    if visible_wrists:
+        head_to_wrist_ratio = min(
+            float(np.linalg.norm(nose[:2] - wrist[:2]) / shoulder_width)
+            for wrist in visible_wrists
+        )
 
     head_vector_x = float(nose[0] - shoulder_mid[0])
     head_vector_up = float(shoulder_mid[1] - nose[1])
     head_offset_deg = math.degrees(math.atan2(head_vector_x, max(1.0, head_vector_up)))
-
     confidence = min(required_confidence, face_confidence)
+
+    desk_rest = (
+        face_below_shoulder_ratio >= desk_rest_face_ratio
+        and head_to_wrist_ratio is not None
+        and head_to_wrist_ratio <= desk_rest_wrist_ratio
+    )
+    if desk_rest:
+        return PoseEvidence(
+            valid=True,
+            low_head=True,
+            pitch_proxy_deg=90.0,
+            head_offset_deg=head_offset_deg,
+            shoulder_width_px=shoulder_width,
+            confidence=confidence,
+            posture_mode="desk_rest",
+            face_below_shoulder_ratio=face_below_shoulder_ratio,
+            head_to_wrist_ratio=head_to_wrist_ratio,
+        )
+    if vertical_span < 8.0:
+        return PoseEvidence(
+            False,
+            False,
+            None,
+            head_offset_deg,
+            shoulder_width,
+            confidence,
+            "pose geometry is too small or inverted",
+            face_below_shoulder_ratio=face_below_shoulder_ratio,
+            head_to_wrist_ratio=head_to_wrist_ratio,
+        )
+
+    nose_drop = float(nose[1] - face_anchor[1])
+    pitch_proxy_deg = math.degrees(math.atan2(nose_drop, vertical_span))
+    low_head = pitch_proxy_deg >= pitch_threshold_deg and abs(head_offset_deg) <= max_head_offset_deg
     return PoseEvidence(
         valid=True,
-        low_head=pitch_proxy_deg >= pitch_threshold_deg,
+        low_head=low_head,
         pitch_proxy_deg=pitch_proxy_deg,
         head_offset_deg=head_offset_deg,
         shoulder_width_px=shoulder_width,
         confidence=confidence,
+        posture_mode="head_pitch",
+        face_below_shoulder_ratio=face_below_shoulder_ratio,
+        head_to_wrist_ratio=head_to_wrist_ratio,
     )
+
+
+@dataclass(frozen=True)
+class _ActivitySample:
+    timestamp_ms: int
+    points: np.ndarray
+
+
+class PoseActivityTracker:
+    """Measure recent upper-body motion in shoulder-width units.
+
+    Coordinates are normalized around the shoulder midpoint, which removes
+    most whole-person translation and scale changes. The score is the 90th
+    percentile of elbow/wrist travel over the rolling window. A low score is
+    evidence of inactivity; it is not a sleep decision on its own.
+    """
+
+    _MOTION_POINTS = (
+        CocoKeypoint.LEFT_ELBOW,
+        CocoKeypoint.RIGHT_ELBOW,
+        CocoKeypoint.LEFT_WRIST,
+        CocoKeypoint.RIGHT_WRIST,
+    )
+
+    def __init__(
+        self,
+        *,
+        window_ms: int = 3_000,
+        min_history_ms: int = 1_500,
+        min_confidence: float = 0.35,
+        inactivity_threshold: float = 0.18,
+        track_timeout_ms: int = 3_000,
+    ) -> None:
+        if min(window_ms, min_history_ms, track_timeout_ms) <= 0:
+            raise ValueError("activity durations must be positive")
+        if min_history_ms > window_ms:
+            raise ValueError("minimum activity history must not exceed the window")
+        if inactivity_threshold < 0:
+            raise ValueError("activity threshold must not be negative")
+        self.window_ms = window_ms
+        self.min_history_ms = min_history_ms
+        self.min_confidence = min_confidence
+        self.inactivity_threshold = inactivity_threshold
+        self.track_timeout_ms = track_timeout_ms
+        self._samples: dict[int, deque[_ActivitySample]] = {}
+        self._last_update_ms: dict[int, int] = {}
+
+    def update(self, track_id: int, timestamp_ms: int, keypoints: np.ndarray) -> ActivityEvidence:
+        points = np.asarray(keypoints, dtype=np.float64)
+        if points.shape != (17, 3):
+            return ActivityEvidence(False, None, False, f"expected (17, 3), got {points.shape}")
+
+        left_shoulder = points[CocoKeypoint.LEFT_SHOULDER]
+        right_shoulder = points[CocoKeypoint.RIGHT_SHOULDER]
+        if min(left_shoulder[2], right_shoulder[2]) < self.min_confidence:
+            return ActivityEvidence(False, None, False, "shoulder confidence too low")
+        shoulder_width = float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2]))
+        if shoulder_width < 8.0:
+            return ActivityEvidence(False, None, False, "shoulder width too small")
+
+        shoulder_mid = (left_shoulder[:2] + right_shoulder[:2]) / 2.0
+        normalized = np.full((17, 3), np.nan, dtype=np.float64)
+        visible = points[:, 2] >= self.min_confidence
+        normalized[visible, :2] = (points[visible, :2] - shoulder_mid) / shoulder_width
+        normalized[visible, 2] = points[visible, 2]
+
+        samples = self._samples.setdefault(track_id, deque())
+        samples.append(_ActivitySample(timestamp_ms, normalized))
+        self._last_update_ms[track_id] = timestamp_ms
+        cutoff = timestamp_ms - self.window_ms
+        while len(samples) > 1 and samples[0].timestamp_ms < cutoff:
+            samples.popleft()
+
+        history_ms = timestamp_ms - samples[0].timestamp_ms
+        if history_ms < self.min_history_ms:
+            return ActivityEvidence(False, None, False, "activity window warming up")
+
+        spans: list[float] = []
+        for index in self._MOTION_POINTS:
+            coordinates = np.asarray(
+                [sample.points[index, :2] for sample in samples if np.isfinite(sample.points[index, 0])]
+            )
+            if len(coordinates) < 3:
+                continue
+            low = np.percentile(coordinates, 10, axis=0)
+            high = np.percentile(coordinates, 90, axis=0)
+            spans.append(float(np.linalg.norm(high - low)))
+
+        if not spans:
+            return ActivityEvidence(False, None, False, "elbow and wrist confidence too low")
+        score = float(np.percentile(spans, 90))
+        return ActivityEvidence(True, score, score <= self.inactivity_threshold)
+
+    def prune(self, timestamp_ms: int) -> list[int]:
+        expired = [
+            track_id
+            for track_id, last_update_ms in self._last_update_ms.items()
+            if timestamp_ms - last_update_ms >= self.track_timeout_ms
+        ]
+        for track_id in expired:
+            self._last_update_ms.pop(track_id, None)
+            self._samples.pop(track_id, None)
+        return expired
 
 
 class SleepStateMachine:
