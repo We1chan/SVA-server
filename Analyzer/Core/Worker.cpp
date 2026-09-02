@@ -735,7 +735,9 @@ namespace SVAAnalyzer
                                 }
                                 
                                 // 时态追踪：给每个检测框分配 trackId，计算速度/轨迹/区域状态
-                                mScheduler->updateTemporalTracks(control, control.streamCode, detectPtrs, getCurTime());
+                                const int64_t behaviorTimestampMs = getCurTime();
+                                mScheduler->updateTemporalTracks(control, control.streamCode, detectPtrs, behaviorTimestampMs);
+                                mScheduler->updateSleepDetection(control.streamCode, image, detectPtrs, behaviorTimestampMs);
                                 
                                 // 步骤2: 对每个追踪到的目标做原子行为规则评估
                                 for (size_t di = 0; di < happenDetects.size(); ++di)
@@ -779,9 +781,9 @@ namespace SVAAnalyzer
                                 }
                                 
                                 // 步骤3: 帧级聚合行为规则评估
-                                mScheduler->evaluateAggregateBehaviorRules(control, control.streamCode, happenDetects, getCurTime(), aggMatches);
-                                mScheduler->evaluateRelationalBehaviorRules(control, control.streamCode, happenDetects, getCurTime(), aggMatches);
-                                mScheduler->applySequenceBehaviorRules(control, control.streamCode, happenDetects, aggMatches, getCurTime());
+                                mScheduler->evaluateAggregateBehaviorRules(control, control.streamCode, happenDetects, behaviorTimestampMs, aggMatches);
+                                mScheduler->evaluateRelationalBehaviorRules(control, control.streamCode, happenDetects, behaviorTimestampMs, aggMatches);
+                                mScheduler->applySequenceBehaviorRules(control, control.streamCode, happenDetects, aggMatches, behaviorTimestampMs);
                                 happen = false;
                                 happenScore = 0.0f;
                                 for (size_t di = 0; di < happenDetects.size(); ++di)
@@ -923,6 +925,17 @@ namespace SVAAnalyzer
                                 obj.motionState = src.motionState;
                                 obj.trackNew = src.trackNew;
                                 obj.trail = src.trail;
+                                obj.sleepEvidenceEvaluated = src.sleepEvidenceEvaluated;
+                                obj.postureCandidate = src.postureCandidate;
+                                obj.strictPoseSignal = src.strictPoseSignal;
+                                obj.eyeEvidenceValid = src.eyeEvidenceValid;
+                                obj.eyesClosed = src.eyesClosed;
+                                obj.sleepEvent = src.sleepEvent;
+                                obj.sleepState = src.sleepState;
+                                obj.sleepEvidenceSource = src.sleepEvidenceSource;
+                                obj.pitchProxyDeg = src.pitchProxyDeg;
+                                obj.activityScore = src.activityScore;
+                                obj.eyeClosedProbability = src.eyeClosedProbability;
                                 obj.ruleId = src.ruleId;
                                 obj.customEventName = src.customEventName;
                                 obj.behaviorType = src.behaviorType;

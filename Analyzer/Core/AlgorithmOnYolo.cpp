@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <stdexcept>
 #include <opencv2/dnn.hpp>
 
 namespace SVAAnalyzer
@@ -30,13 +31,14 @@ namespace SVAAnalyzer
             LOGI("%zu,%s", i, providers[i].data());
         }
 
-        bool gpuAssigned = false;
     #if SVA_ONNXRUNTIME_GPU
+        bool gpuAssigned = false;
         /**
          * GPU provider selection strategy (teaching note):
          * 1. TensorRT: fastest, requires engine build/cache.
          * 2. CUDA: direct GPU execution.
-         * 3. CPU: fallback when GPU providers are unavailable or fail to create a session.
+         * CPU execution is deliberately disabled in GPU builds. A missing or broken
+         * GPU provider is a deployment error and must be visible at startup.
          *
          * Build with -DSVA_ONNXRUNTIME_GPU=OFF when using CPU-only ONNX Runtime headers/libs.
          */
@@ -100,14 +102,16 @@ namespace SVAAnalyzer
                 LOGI("failed to append CUDAExecutionProvider: %s", e.what());
             }
         }
-#else
-        LOGI("SVA_ONNXRUNTIME_GPU=OFF, use CPUExecutionProvider only");
-#endif
-
         if (!gpuAssigned)
         {
-            LOGI("no GPU provider appended, fall back to CPU");
+            throw std::runtime_error("SVA_ONNXRUNTIME_GPU=ON but no TensorRT/CUDA provider is available");
         }
+        mSessionOptions.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+#else
+        LOGI("SVA_ONNXRUNTIME_GPU=OFF, use CPUExecutionProvider only");
+        mGpuEnabled = false;
+        mActiveProvider = "CPU";
+#endif
         auto createSession = [this, &modelPath]() {
 #ifdef WIN32
             std::wstring modelPath_ws = std::wstring(modelPath.begin(), modelPath.end());
@@ -117,24 +121,7 @@ namespace SVAAnalyzer
 #endif
         };
 
-        try
-        {
-            mSession = createSession();
-        }
-        catch (const Ort::Exception &e)
-        {
-            if (!gpuAssigned)
-            {
-                throw;
-            }
-            LOGI("failed to create GPU ONNX Runtime session: %s, retry with CPUExecutionProvider", e.what());
-            mSessionOptions.release();
-            mSessionOptions = Ort::SessionOptions();
-            mSessionOptions.SetGraphOptimizationLevel(ORT_ENABLE_ALL);
-            mGpuEnabled = false;
-            mActiveProvider = "CPU";
-            mSession = createSession();
-        }
+        mSession = createSession();
 
     Ort::AllocatorWithDefaultOptions allocator;
     auto input_name = mSession.GetInputNameAllocated(0, allocator);
@@ -155,7 +142,15 @@ namespace SVAAnalyzer
         mOutputDims = output_dims;
         mOutputDim = static_cast<int>(output_dims[1]);
         mOutputRow = static_cast<int>(output_dims[2]);
-        if (mOutputDims.back() == 6)
+        if (mDecoder == YoloOutputDecoder::PoseDenseWithNms)
+        {
+            LOGI("AlgorithmOnYolo output dims=[%lld,%lld,%lld] decoder=pose_dense_with_nms provider=%s",
+                 static_cast<long long>(mOutputDims[0]),
+                 static_cast<long long>(mOutputDims[1]),
+                 static_cast<long long>(mOutputDims[2]),
+                 mActiveProvider.c_str());
+        }
+        else if (mOutputDims.back() == 6)
         {
             mDecoder = YoloOutputDecoder::DirectDetections;
             LOGI("AlgorithmOnYolo output dims=[%lld,%lld,%lld] decoder=direct_detections provider=%s",
@@ -194,6 +189,12 @@ namespace SVAAnalyzer
     void OnnxRuntimeEngine::initPostprocessProfile(const std::string &algorithmCode)
     {
         mDecoder = YoloOutputDecoder::DenseWithNms;
+        if (algorithmCode == "on_yolo11n_pose_sleep")
+        {
+            mDecoder = YoloOutputDecoder::PoseDenseWithNms;
+            LOGI("AlgorithmOnYolo profile=%s decoder=pose_dense_with_nms preprocess=center_letterbox_rgb score=0.35 nms=0.70", algorithmCode.data());
+            return;
+        }
         if (algorithmCode == "on_yolo26n_80" || algorithmCode == "ov_yolo26n_80")
         {
             mDecoder = YoloOutputDecoder::DirectDetections;
@@ -201,6 +202,106 @@ namespace SVAAnalyzer
             return;
         }
         LOGI("AlgorithmOnYolo profile=%s decoder=dense_with_nms preprocess=square_rgb score=0.50 nms=0.50", algorithmCode.data());
+    }
+
+    bool OnnxRuntimeEngine::decodePoseOutputWithNms(const float *pdata,
+                                                    int imageWidth,
+                                                    int imageHeight,
+                                                    float scale,
+                                                    float padX,
+                                                    float padY,
+                                                    std::vector<DetectObject> &detects)
+    {
+        constexpr int poseChannels = 56;
+        constexpr int keypointStart = 5;
+        constexpr int keypointCount = 17;
+        constexpr float scoreThreshold = 0.35f;
+        constexpr float nmsThreshold = 0.70f;
+        if (mOutputDim != poseChannels || scale <= 0.0f)
+        {
+            LOGE("AlgorithmOnYolo invalid pose output channels=%d, expect %d", mOutputDim, poseChannels);
+            return false;
+        }
+
+        cv::Mat outputChannels(mOutputDim, mOutputRow, CV_32F, const_cast<float *>(pdata));
+        cv::Mat rows = outputChannels.t();
+        std::vector<cv::Rect> boxes;
+        std::vector<float> confidences;
+        std::vector<std::array<PoseKeypoint, keypointCount>> keypoints;
+        boxes.reserve(rows.rows);
+        confidences.reserve(rows.rows);
+        keypoints.reserve(rows.rows);
+
+        const auto mapX = [scale, padX, imageWidth](float value)
+        {
+            return std::max(0.0f, std::min((value - padX) / scale, static_cast<float>(imageWidth - 1)));
+        };
+        const auto mapY = [scale, padY, imageHeight](float value)
+        {
+            return std::max(0.0f, std::min((value - padY) / scale, static_cast<float>(imageHeight - 1)));
+        };
+
+        for (int row = 0; row < rows.rows; ++row)
+        {
+            const float score = rows.at<float>(row, 4);
+            if (!std::isfinite(score) || score <= scoreThreshold)
+            {
+                continue;
+            }
+            const float centerX = rows.at<float>(row, 0);
+            const float centerY = rows.at<float>(row, 1);
+            const float width = rows.at<float>(row, 2);
+            const float height = rows.at<float>(row, 3);
+            if (!std::isfinite(centerX) || !std::isfinite(centerY) ||
+                !std::isfinite(width) || !std::isfinite(height) || width <= 0.0f || height <= 0.0f)
+            {
+                continue;
+            }
+
+            const int left = static_cast<int>(mapX(centerX - width * 0.5f));
+            const int top = static_cast<int>(mapY(centerY - height * 0.5f));
+            const int right = static_cast<int>(mapX(centerX + width * 0.5f));
+            const int bottom = static_cast<int>(mapY(centerY + height * 0.5f));
+            if (right <= left || bottom <= top)
+            {
+                continue;
+            }
+
+            std::array<PoseKeypoint, keypointCount> personKeypoints{};
+            for (int index = 0; index < keypointCount; ++index)
+            {
+                const int offset = keypointStart + index * 3;
+                const float x = rows.at<float>(row, offset);
+                const float y = rows.at<float>(row, offset + 1);
+                const float confidence = rows.at<float>(row, offset + 2);
+                if (std::isfinite(x) && std::isfinite(y) && std::isfinite(confidence))
+                {
+                    personKeypoints[index] = {mapX(x), mapY(y), confidence};
+                }
+            }
+            boxes.emplace_back(left, top, right - left, bottom - top);
+            confidences.push_back(score);
+            keypoints.push_back(personKeypoints);
+        }
+
+        std::vector<int> indexes;
+        cv::dnn::NMSBoxes(boxes, confidences, scoreThreshold, nmsThreshold, indexes);
+        for (int index : indexes)
+        {
+            const cv::Rect &box = boxes[index];
+            DetectObject detect;
+            detect.x1 = box.x;
+            detect.y1 = box.y;
+            detect.x2 = box.x + box.width;
+            detect.y2 = box.y + box.height;
+            detect.class_id = 0;
+            detect.class_name = mClassNames.empty() ? "person" : mClassNames.front();
+            detect.class_score = confidences[index];
+            detect.poseValid = true;
+            detect.poseKeypoints = keypoints[index];
+            detects.push_back(detect);
+        }
+        return true;
     }
 
     bool OnnxRuntimeEngine::decodeDenseOutputWithNms(const float *pdata, int imageWidth, int imageHeight, int paddedImageSize, std::vector<DetectObject> &detects)
@@ -385,9 +486,30 @@ namespace SVAAnalyzer
 
         cv::Mat inputImage;
         int paddedImageSize = std::max(image_h, image_w);
+        float poseScale = 1.0f;
+        float posePadX = 0.0f;
+        float posePadY = 0.0f;
         if (mDecoder == YoloOutputDecoder::DirectDetections)
         {
             inputImage = image;
+        }
+        else if (mDecoder == YoloOutputDecoder::PoseDenseWithNms)
+        {
+            poseScale = std::min(static_cast<float>(mInputWidth) / static_cast<float>(image_w),
+                                 static_cast<float>(mInputHeight) / static_cast<float>(image_h));
+            const int resizedWidth = static_cast<int>(std::round(image_w * poseScale));
+            const int resizedHeight = static_cast<int>(std::round(image_h * poseScale));
+            const float halfPadX = (mInputWidth - resizedWidth) * 0.5f;
+            const float halfPadY = (mInputHeight - resizedHeight) * 0.5f;
+            const int left = static_cast<int>(std::round(halfPadX - 0.1f));
+            const int right = static_cast<int>(std::round(halfPadX + 0.1f));
+            const int top = static_cast<int>(std::round(halfPadY - 0.1f));
+            const int bottom = static_cast<int>(std::round(halfPadY + 0.1f));
+            cv::Mat resized;
+            cv::resize(image, resized, cv::Size(resizedWidth, resizedHeight), 0.0, 0.0, cv::INTER_LINEAR);
+            cv::copyMakeBorder(resized, inputImage, top, bottom, left, right, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+            posePadX = static_cast<float>(left);
+            posePadY = static_cast<float>(top);
         }
         else
         {
@@ -396,7 +518,7 @@ namespace SVAAnalyzer
             image.copyTo(inputImage(roi));
         }
 
-        const bool swapRB = (mDecoder == YoloOutputDecoder::DenseWithNms);
+        const bool swapRB = (mDecoder != YoloOutputDecoder::DirectDetections);
         cv::Mat blob = cv::dnn::blobFromImage(inputImage, 1 / 255.0, cv::Size(mInputWidth, mInputHeight), cv::Scalar(0, 0, 0), swapRB, false);
         size_t tpixels = static_cast<size_t>(mInputHeight * mInputWidth * 3);
         std::array<int64_t, 4> input_shape_info{1, 3, mInputHeight, mInputWidth};
@@ -423,6 +545,10 @@ namespace SVAAnalyzer
         if (mDecoder == YoloOutputDecoder::DirectDetections)
         {
             return decodeDirectDetections(pdata, image_w, image_h, detects);
+        }
+        if (mDecoder == YoloOutputDecoder::PoseDenseWithNms)
+        {
+            return decodePoseOutputWithNms(pdata, image_w, image_h, poseScale, posePadX, posePadY, detects);
         }
         return decodeDenseOutputWithNms(pdata, image_w, image_h, paddedImageSize, detects);
     }

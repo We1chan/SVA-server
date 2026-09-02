@@ -116,4 +116,27 @@ python -m venv .venv
 
 该脚本只创建 CUDA Execution Provider，并设置 `session.disable_cpu_ep_fallback=1`；GPU 不可用时直接失败，不会静默改用 CPU。
 
+## C++ 服务接入
+
+服务侧算法编号为 `on_yolo11n_pose_sleep`。部署前把两个模型放到 `config.json` 的 `modelDir`：
+
+```bash
+install -m 0644 yolo11n-pose.onnx /opt/SVA/models/yolo11n-pose.onnx
+install -m 0644 models/open-closed-eye-0001.onnx /opt/SVA/models/open-closed-eye-0001.onnx
+```
+
+布控使用 `on_yolo11n_pose_sleep` 检测 `person`，并配置 `behaviorType: "sleep"` 的行为规则。C++ 数据流为：Pose ONNX 解码 17 个关键点 → 现有时态跟踪分配 `trackId` → 姿势/活动量初筛 → 候选眼部 CUDA 推理 → PERCLOS 与四态状态机 → 一次性 `sleepEvent` 进入现有告警链路。
+
+逐目标结构化上报会附带 `sleepState`、`sleepEvent`、`sleepEvidenceSource`、`postureCandidate`、`strictPoseSignal`、`pitchProxyDeg`、`activityScore`、`eyeEvidenceValid`、`eyesClosed` 和 `eyeClosedProbability`，便于验收时定位阈值和证据来源。
+
+默认构建 `SVA_ONNXRUNTIME_GPU=ON` 时，普通 YOLO、Pose 和眼部 ONNX 均禁止 CPU Execution Provider 回退；机器缺少 TensorRT/CUDA Provider 或 GPU Session 创建失败时，服务会在启动阶段明确失败。只有显式使用 `-DSVA_ONNXRUNTIME_GPU=OFF` 的排障构建才允许 CPU 推理。
+
+服务侧测试：
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON -DSVA_ONNXRUNTIME_GPU=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
 `test2.mp4` 的首轮负样本标定过程和结果见 [CALIBRATION.md](CALIBRATION.md)。

@@ -4,6 +4,7 @@
 #include "Worker.h"
 #include "Algorithm.h"
 #include "AlgorithmOnYolo.h"
+#include "SleepAnalyzer.h"
 #include "GenerateAlarmVideo.h"
 #include "Utils/Common.h"
 #include "Utils/Log.h"
@@ -141,6 +142,14 @@ namespace SVAAnalyzer
             delete on_yolo26n_80;
             on_yolo26n_80 = nullptr;
         }
+        if (on_yolo11n_pose_sleep) {
+            delete on_yolo11n_pose_sleep;
+            on_yolo11n_pose_sleep = nullptr;
+        }
+        if (mSleepAnalyzer) {
+            delete mSleepAnalyzer;
+            mSleepAnalyzer = nullptr;
+        }
 
         clearAlarmQueue();
         clearDetectFrameQueue();
@@ -166,7 +175,7 @@ namespace SVAAnalyzer
     }
     bool Scheduler::initAlgorithm()
     {
-        LOGI("initAlgorithm() start - pure ONNX Runtime (GPU优先，CPU回退)");
+        LOGI("initAlgorithm() start - pure ONNX Runtime (GPU build is strict GPU-only)");
 
         // 80-class COCO class names shared by YOLO11 and YOLO26.
         std::string modelPath = mConfig->modelDir + "/yolo11n.onnx";
@@ -187,7 +196,22 @@ namespace SVAAnalyzer
         modelPath = mConfig->modelDir + "/yolo26s.onnx";
         on_yolo26n_80 = new AlgorithmOnYolo(mConfig, modelPath, classNames, "on_yolo26n_80");
 
-        LOGI("initAlgorithm() end - total ONNX models loaded: 2");
+        modelPath = mConfig->modelDir + "/yolo11n-pose.onnx";
+        std::ifstream poseModel(modelPath, std::ios::binary);
+        if (poseModel.good())
+        {
+            std::vector<std::string> poseClassNames = {"person"};
+            LOGI("初始化 on_yolo11n_pose_sleep (yolo11n-pose.onnx)");
+            on_yolo11n_pose_sleep = new AlgorithmOnYolo(mConfig, modelPath, poseClassNames, "on_yolo11n_pose_sleep");
+            const std::string eyeModelPath = mConfig->modelDir + "/open-closed-eye-0001.onnx";
+            mSleepAnalyzer = new SleepAnalyzer(mConfig, eyeModelPath);
+        }
+        else
+        {
+            LOGI("skip on_yolo11n_pose_sleep: model not found at %s", modelPath.c_str());
+        }
+
+        LOGI("initAlgorithm() end - sleep pose model loaded=%d", on_yolo11n_pose_sleep ? 1 : 0);
         return true;
     }
     void Scheduler::loop()
@@ -719,6 +743,17 @@ namespace SVAAnalyzer
                 item["algorithmCode"] = obj.algorithmCode;
                 item["happen"] = obj.happen;
                 item["trackId"] = obj.trackId;
+                item["sleepEvidenceEvaluated"] = obj.sleepEvidenceEvaluated;
+                item["postureCandidate"] = obj.postureCandidate;
+                item["strictPoseSignal"] = obj.strictPoseSignal;
+                item["eyeEvidenceValid"] = obj.eyeEvidenceValid;
+                item["eyesClosed"] = obj.eyesClosed;
+                item["sleepEvent"] = obj.sleepEvent;
+                item["sleepState"] = obj.sleepState;
+                item["sleepEvidenceSource"] = obj.sleepEvidenceSource;
+                item["pitchProxyDeg"] = obj.pitchProxyDeg.has_value() ? Json::Value(*obj.pitchProxyDeg) : Json::Value(Json::nullValue);
+                item["activityScore"] = obj.activityScore.has_value() ? Json::Value(*obj.activityScore) : Json::Value(Json::nullValue);
+                item["eyeClosedProbability"] = obj.eyeClosedProbability.has_value() ? Json::Value(*obj.eyeClosedProbability) : Json::Value(Json::nullValue);
                 item["ruleId"] = obj.ruleId;
                 item["customEventName"] = obj.customEventName;
                 item["behaviorType"] = obj.behaviorType;
@@ -1994,6 +2029,10 @@ namespace SVAAnalyzer
     {
         std::lock_guard<std::mutex> lock(mStreamTemporalMtx);
         mStreamTemporalContextMap.erase(streamCode);
+        if (mSleepAnalyzer)
+        {
+            mSleepAnalyzer->clearStream(streamCode);
+        }
     }
 
     /**
@@ -2019,6 +2058,17 @@ namespace SVAAnalyzer
         
         // Run the tracker
         TemporalProcessor::updateStream(context, control, detects, timestampMs);
+    }
+
+    void Scheduler::updateSleepDetection(const std::string &streamCode,
+                                         cv::Mat &image,
+                                         const std::vector<DetectObject *> &detects,
+                                         int64_t timestampMs)
+    {
+        if (mSleepAnalyzer)
+        {
+            mSleepAnalyzer->process(streamCode, image, detects, timestampMs);
+        }
     }
 
     /**

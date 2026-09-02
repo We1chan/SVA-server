@@ -4,10 +4,12 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <array>
 #include <unordered_map>
 #include <cstdint>
 #include <opencv2/opencv.hpp> //opencv header file
 #include "TrackMetadata.h"
+#include "SleepDetection.h"
 
 namespace SVAAnalyzer
 {
@@ -52,6 +54,23 @@ namespace SVAAnalyzer
         std::string class_name;
         std::string source_algorithm;
         bool happen = false;
+
+        // COCO Pose output (from the sleep-pose algorithm only)
+        bool poseValid = false;
+        std::array<PoseKeypoint, 17> poseKeypoints{};
+
+        // Hybrid sleep evidence (filled after temporal track assignment)
+        bool sleepEvidenceEvaluated = false;
+        bool postureCandidate = false;
+        bool strictPoseSignal = false;
+        std::optional<float> pitchProxyDeg;
+        std::optional<float> activityScore;
+        bool eyeEvidenceValid = false;
+        bool eyesClosed = false;
+        std::optional<float> eyeClosedProbability;
+        std::string sleepState = "NORMAL";
+        std::string sleepEvidenceSource = "none";
+        bool sleepEvent = false;
 
         // Temporal tracking (from TemporalProcessor)
         int trackId = -1;

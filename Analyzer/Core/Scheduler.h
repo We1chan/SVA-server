@@ -8,6 +8,7 @@
 #include <thread>
 #include <string>
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <opencv2/opencv.hpp>
@@ -19,6 +20,7 @@ namespace SVAAnalyzer
 	class Config;
 	class Worker;
 	class Algorithm;
+	class SleepAnalyzer;
 	struct Control;
 	struct AlarmImage;
 	struct Alarm;
@@ -59,6 +61,19 @@ namespace SVAAnalyzer
 		std::string motionState;
 		bool trackNew = false;
 		std::vector<TrackTrailPoint> trail;
+
+		// Sleep cascade diagnostics
+		bool sleepEvidenceEvaluated = false;
+		bool postureCandidate = false;
+		bool strictPoseSignal = false;
+		bool eyeEvidenceValid = false;
+		bool eyesClosed = false;
+		bool sleepEvent = false;
+		std::string sleepState = "NORMAL";
+		std::string sleepEvidenceSource = "none";
+		std::optional<float> pitchProxyDeg;
+		std::optional<float> activityScore;
+		std::optional<float> eyeClosedProbability;
 		
 		// Behavior analysis fields (populated by BehaviorEvaluator)
 		std::string ruleId;
@@ -290,6 +305,8 @@ namespace SVAAnalyzer
 		 */
 		Algorithm *on_yolo11n_80 = nullptr;
 		Algorithm *on_yolo26n_80 = nullptr;
+		Algorithm *on_yolo11n_pose_sleep = nullptr;
+		SleepAnalyzer *mSleepAnalyzer = nullptr;
 		void loop();
 
 		void setState(bool state);
@@ -313,6 +330,10 @@ namespace SVAAnalyzer
 								  const std::string &streamCode,
 								  std::vector<DetectObject *> detects,
 								  int64_t timestampMs);
+		void updateSleepDetection(const std::string &streamCode,
+							  cv::Mat &image,
+							  const std::vector<DetectObject *> &detects,
+							  int64_t timestampMs);
 		
 		/**
 		 * @brief Evaluate aggregate behavior rules (count, occupancy, absence).

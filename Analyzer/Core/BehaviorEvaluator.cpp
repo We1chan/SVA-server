@@ -291,6 +291,13 @@ namespace SVAAnalyzer
                 return false;
             }
 
+            // Pose/eye cascade already includes its own calibrated temporal gate.
+            // Consume only the transition event so one sleep episode emits once.
+            if (detect.sleepEvidenceEvaluated)
+            {
+                return detect.sleepEvent;
+            }
+
             const int64_t thresholdMs = std::max<int64_t>(1000, rule.thresholdMs > 0 ? rule.thresholdMs : 15000);
             const int64_t activeDurationMs = regionState ? regionState->inRegionDurationMs : detect.dwellMs;
             if (activeDurationMs < thresholdMs)

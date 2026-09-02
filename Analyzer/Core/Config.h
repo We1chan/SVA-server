@@ -20,7 +20,7 @@ namespace SVAAnalyzer
 	 * 
 	 * ## 教学注意
 	 * - modelDir 必须指向包含 yolo11n.onnx、yolo26s.onnx 等 ONNX 模型文件的目录
-	 * - ONNX Runtime 在加载模型时自动检测 GPU（TensorRT > CUDA > CPU）
+	 * - GPU 构建要求 TensorRT/CUDA，禁止静默回退 CPU；只有显式关闭 SVA_ONNXRUNTIME_GPU 才使用 CPU
 	 * - 无需 OpenVINO，所有推理统一使用 ONNX Runtime
 	 */
 	class Config

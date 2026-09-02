@@ -49,6 +49,8 @@ set(source
         Analyzer/Core/GenerateAlarmVideo.cpp
         Analyzer/Core/Scheduler.cpp
         Analyzer/Core/Server.cpp
+        Analyzer/Core/SleepAnalyzer.cpp
+        Analyzer/Core/SleepDetection.cpp
         Analyzer/Core/TemporalContext.cpp
         Analyzer/Core/Worker.cpp
         Analyzer/main.cpp)
@@ -69,4 +71,18 @@ if(BUILD_TESTING)
   target_include_directories(ControlLegacyDwellTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Analyzer/Core)
   target_link_libraries(ControlLegacyDwellTest ${OpenCV_LIBS} jsoncpp)
   add_test(NAME ControlLegacyDwellTest COMMAND ControlLegacyDwellTest)
+
+  add_executable(SleepDetectionTest
+          tests/SleepDetectionTest.cpp
+          Analyzer/Core/SleepDetection.cpp)
+  target_include_directories(SleepDetectionTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Analyzer/Core)
+  add_test(NAME SleepDetectionTest COMMAND SleepDetectionTest)
+
+  add_executable(SleepBehaviorEvaluatorTest
+          tests/SleepBehaviorEvaluatorTest.cpp
+          Analyzer/Core/BehaviorEvaluator.cpp
+          Analyzer/Core/Utils/GeometryUtils.cpp)
+  target_include_directories(SleepBehaviorEvaluatorTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Analyzer/Core)
+  target_link_libraries(SleepBehaviorEvaluatorTest ${OpenCV_LIBS} jsoncpp)
+  add_test(NAME SleepBehaviorEvaluatorTest COMMAND SleepBehaviorEvaluatorTest)
 endif()
