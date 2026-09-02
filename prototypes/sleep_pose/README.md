@@ -27,6 +27,15 @@ python -m venv .venv
 
 默认使用 `device=0`：YOLO Pose 使用 PyTorch CUDA，眼部 ONNX 使用 ONNX Runtime CUDA，并显式禁止 CPU 执行回退。若只做 CPU 排障，需要同时传入 `--device cpu --disable-eye`。
 
+需要导出 Pose ONNX 时，再安装导出依赖（避免常规运行环境携带无关包）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-export.txt
+.\.venv\Scripts\yolo.exe export model=yolo11n-pose.pt format=onnx imgsz=640 opset=17 simplify=True dynamic=False
+```
+
+当前验证模型固定输入为 `[1,3,640,640]`、输出为 `[1,56,8400]`、FP32、opset 17。导出的 `yolo11n-pose.onnx` 不提交到 Git，部署时按项目模型发布流程放入模型目录；本轮验证文件的 SHA-256 为 `05A80FBE7ED3F00681173A8E14A8587D7CA2E3D429E12950C50723B5E404A478`。
+
 ## 运行
 
 从本目录执行：
@@ -89,5 +98,22 @@ python -m venv .venv
 ```
 
 当前单元测试共 20 项。素材回归结果为：`test3/test4` 正样本可检出，`test6/test8` 负样本为 0 事件，`test7` 边界样本保留 1 次事件；详细数据见 [CALIBRATION.md](CALIBRATION.md)。下一阶段可开始 C++/ONNX Runtime CUDA 移植。
+
+导出后可以在相同抽样帧上验证 PyTorch 与 ONNX Runtime CUDA 的检测级一致性：
+
+```powershell
+.\.venv\Scripts\python.exe .\compare_pose_backends.py `
+  --pt-model .\yolo11n-pose.pt `
+  --onnx-model .\yolo11n-pose.onnx `
+  --source D:\Coding\fwwsva\test3.mp4 `
+  --source D:\Coding\fwwsva\test4.mp4 `
+  --source D:\Coding\fwwsva\test6.mp4 `
+  --source D:\Coding\fwwsva\test7.mp4 `
+  --source D:\Coding\fwwsva\test8.mp4 `
+  --samples-per-source 5 `
+  --output .\outputs\onnx-parity-25.json
+```
+
+该脚本只创建 CUDA Execution Provider，并设置 `session.disable_cpu_ep_fallback=1`；GPU 不可用时直接失败，不会静默改用 CPU。
 
 `test2.mp4` 的首轮负样本标定过程和结果见 [CALIBRATION.md](CALIBRATION.md)。
