@@ -143,4 +143,6 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+2026-09-02 已使用 `test4.mp4` 35–60 秒精确片段完成 C++ GPU 端到端验收：服务输出完整四态转移，上报 1 组同 `eventId` 的 `detect.event start/end`，重复命中被冷却机制拦截，详细结果见 [CALIBRATION.md](CALIBRATION.md)。
+
 `test2.mp4` 的首轮负样本标定过程和结果见 [CALIBRATION.md](CALIBRATION.md)。

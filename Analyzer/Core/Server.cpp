@@ -98,11 +98,33 @@ void Server::start(void *arg)
 
     std::thread([](Scheduler *scheduler)
                 {
-                    LOGI("启动分析器服务：http://0.0.0.0:%d", scheduler->getConfig()->analyzerPort);
-
                     event_config *evt_config = event_config_new();
+                    if (evt_config == nullptr)
+                    {
+                        LOGE("创建 HTTP event config 失败");
+                        scheduler->setState(false);
+                        return;
+                    }
+
                     struct event_base *base = event_base_new_with_config(evt_config);
+                    if (base == nullptr)
+                    {
+                        LOGE("创建 HTTP event base 失败");
+                        event_config_free(evt_config);
+                        scheduler->setState(false);
+                        return;
+                    }
+
                     struct evhttp *http = evhttp_new(base);
+                    if (http == nullptr)
+                    {
+                        LOGE("创建 HTTP server 失败");
+                        event_base_free(base);
+                        event_config_free(evt_config);
+                        scheduler->setState(false);
+                        return;
+                    }
+
                     evhttp_set_default_content_type(http, "text/html; charset=utf-8");
 
                     evhttp_set_timeout(http, 0);
@@ -115,12 +137,22 @@ void Server::start(void *arg)
                     evhttp_set_cb(http, "/api/control/cancel", api_control_cancel, scheduler);
                     evhttp_set_cb(http, "/api/alarm/bind-media", api_alarm_bind_media, scheduler);
 
-                    evhttp_bind_socket(http, "0.0.0.0",
-                                       scheduler->getConfig()->analyzerPort);
+                    const int analyzerPort = scheduler->getConfig()->analyzerPort;
+                    if (evhttp_bind_socket(http, "0.0.0.0", analyzerPort) != 0)
+                    {
+                        LOGE("分析器服务绑定失败：http://0.0.0.0:%d（端口可能已被占用）", analyzerPort);
+                        evhttp_free(http);
+                        event_base_free(base);
+                        event_config_free(evt_config);
+                        scheduler->setState(false);
+                        return;
+                    }
+
+                    LOGI("启动分析器服务：http://0.0.0.0:%d", analyzerPort);
                     event_base_dispatch(base);
 
-                    event_base_free(base);
                     evhttp_free(http);
+                    event_base_free(base);
                     event_config_free(evt_config);
 
                     scheduler->setState(false); },

@@ -398,7 +398,7 @@ namespace SVAAnalyzer
 
 	private:
 		Config *mConfig;
-		bool mState;
+		std::atomic_bool mState;
 
 		std::map<std::string, Worker *> mWorkerMap; // <control.code, Worker*>: API lookup by control.
 		std::map<std::string, Worker *> mStreamWorkerMap; // <stream.code/url, Worker*>: share one Worker per stream.
