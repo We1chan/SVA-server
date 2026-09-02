@@ -97,7 +97,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest -v test_sleep_logic.py
 ```
 
-当前单元测试共 20 项。素材回归结果为：`test3/test4` 正样本可检出，`test6/test8` 负样本为 0 事件，`test7` 边界样本保留 1 次事件；详细数据见 [CALIBRATION.md](CALIBRATION.md)。下一阶段可开始 C++/ONNX Runtime CUDA 移植。
+当前单元测试共 20 项。素材回归结果为：`test3/test4` 正样本可检出，`test6/test8` 负样本为 0 事件，`test7` 边界样本保留 1 次事件；详细数据见 [CALIBRATION.md](CALIBRATION.md)。C++/ONNX Runtime CUDA 接入已完成，服务侧部署与验证方法见下文。
 
 导出后可以在相同抽样帧上验证 PyTorch 与 ONNX Runtime CUDA 的检测级一致性：
 
@@ -130,6 +130,10 @@ install -m 0644 models/open-closed-eye-0001.onnx /opt/SVA/models/open-closed-eye
 逐目标结构化上报会附带 `sleepState`、`sleepEvent`、`sleepEvidenceSource`、`postureCandidate`、`strictPoseSignal`、`pitchProxyDeg`、`activityScore`、`eyeEvidenceValid`、`eyesClosed` 和 `eyeClosedProbability`，便于验收时定位阈值和证据来源。
 
 默认构建 `SVA_ONNXRUNTIME_GPU=ON` 时，普通 YOLO、Pose 和眼部 ONNX 均禁止 CPU Execution Provider 回退；机器缺少 TensorRT/CUDA Provider 或 GPU Session 创建失败时，服务会在启动阶段明确失败。只有显式使用 `-DSVA_ONNXRUNTIME_GPU=OFF` 的排障构建才允许 CPU 推理。
+
+当前 WSL 验证组合为 ONNX Runtime GPU `1.26.0`（CUDA 13 发布包）、CUDA `13.1` 和 cuDNN `9.12.0.46`。运行前必须确保动态链接器可以解析 `libonnxruntime_providers_cuda.so` 的 CUDA/cuDNN 依赖；如果 cuDNN 不在系统库目录，需要将其目录加入动态链接器配置或写入 CUDA Provider 库的 RUNPATH。TensorRT 是可选加速项，未安装 `libnvinfer.so.10` 时会跳过并使用 CUDA。
+
+启动日志必须同时出现 Pose 的 `provider=CUDA`（或 `TensorRT/CUDA`）和眼部模型的 `sleep eye classifier loaded provider=CUDA`；由于 GPU 构建关闭了 CPU EP 回退，任一模型无法分配到 GPU 都会直接启动失败。
 
 服务侧测试：
 
