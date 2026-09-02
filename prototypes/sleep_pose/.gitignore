@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 *.pt
 *.onnx
+!models/open-closed-eye-0001.onnx
 outputs/

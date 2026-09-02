@@ -2,7 +2,16 @@ import unittest
 
 import numpy as np
 
-from sleep_logic import PoseActivityTracker, SleepState, SleepStateMachine, estimate_head_pose
+from sleep_logic import (
+    EyeEvidence,
+    EyeClosureTracker,
+    EyeInferenceScheduler,
+    HybridEvidenceTracker,
+    PoseActivityTracker,
+    SleepState,
+    SleepStateMachine,
+    estimate_head_pose,
+)
 
 
 def make_pose(*, nose_y: float, confidence: float = 0.95) -> np.ndarray:
@@ -126,6 +135,78 @@ class StateMachineTests(unittest.TestCase):
         machine.update(3, 0, True)
         self.assertEqual(machine.update(3, 100, None).state, SleepState.SUSPECTED)
         self.assertEqual(machine.update(3, 300, None).state, SleepState.NORMAL)
+
+    def test_per_observation_sleep_duration_can_be_shorter(self) -> None:
+        machine = SleepStateMachine(sleep_duration_ms=1000, recovery_duration_ms=500)
+        machine.update(4, 0, True, sleep_duration_ms=400)
+        update = machine.update(4, 400, True, sleep_duration_ms=400)
+        self.assertEqual(update.state, SleepState.SLEEPING)
+        self.assertTrue(update.sleep_event)
+
+    def test_candidate_can_remain_suspected_without_confirmation(self) -> None:
+        machine = SleepStateMachine(sleep_duration_ms=500, recovery_duration_ms=200)
+        self.assertEqual(machine.update(5, 0, False, suspect_signal=True).state, SleepState.SUSPECTED)
+        self.assertEqual(machine.update(5, 1000, False, suspect_signal=True).state, SleepState.SUSPECTED)
+        update = machine.update(5, 1100, False, suspect_signal=False)
+        self.assertEqual(update.state, SleepState.NORMAL)
+
+
+class EyePipelineTests(unittest.TestCase):
+    def test_scheduler_uses_sparse_probe_then_full_rate_candidate(self) -> None:
+        scheduler = EyeInferenceScheduler(probe_interval_ms=200, candidate_hold_ms=500)
+        self.assertTrue(scheduler.should_infer(1, 0, False))
+        self.assertFalse(scheduler.should_infer(1, 100, False))
+        self.assertTrue(scheduler.should_infer(1, 200, False))
+        self.assertTrue(scheduler.should_infer(1, 250, True))
+        self.assertTrue(scheduler.should_infer(1, 300, False))
+
+    def test_closed_probe_activates_full_rate_inference(self) -> None:
+        scheduler = EyeInferenceScheduler(probe_interval_ms=200, candidate_hold_ms=500)
+        scheduler.should_infer(2, 0, False)
+        scheduler.observe(2, 0, EyeEvidence(True, True, 0.9))
+        self.assertTrue(scheduler.should_infer(2, 50, False))
+
+    def test_perclos_tolerates_occasional_open_classification(self) -> None:
+        tracker = EyeClosureTracker(window_ms=1000, min_history_ms=400, closed_ratio_threshold=0.60)
+        tracker.update(3, 0, EyeEvidence(True, True, 0.9))
+        tracker.update(3, 200, EyeEvidence(True, False, 0.1))
+        tracker.update(3, 400, EyeEvidence(True, True, 0.9))
+        evidence = tracker.update(3, 600, EyeEvidence(True, True, 0.9))
+        self.assertTrue(evidence.valid)
+        self.assertTrue(evidence.closed)
+        self.assertIn("perclos=", evidence.reason)
+
+
+class HybridEvidenceTests(unittest.TestCase):
+    def test_eye_evidence_takes_priority_over_pose(self) -> None:
+        tracker = HybridEvidenceTracker(eye_sleep_duration_ms=500, pose_sleep_duration_ms=1000)
+        evidence = tracker.update(1, 0, EyeEvidence(True, False, 0.1), True)
+        self.assertTrue(evidence.valid)
+        self.assertFalse(evidence.sleep_signal)
+        self.assertEqual(evidence.source, "eye")
+        self.assertEqual(evidence.sleep_duration_ms, 500)
+
+    def test_missing_eye_uses_grace_before_pose_fallback(self) -> None:
+        tracker = HybridEvidenceTracker(
+            eye_sleep_duration_ms=500,
+            pose_sleep_duration_ms=1000,
+            eye_grace_ms=200,
+        )
+        tracker.update(2, 0, EyeEvidence(True, True, 0.9), False)
+        grace = tracker.update(2, 100, EyeEvidence(False, False, None, "missing"), False)
+        self.assertTrue(grace.sleep_signal)
+        self.assertEqual(grace.source, "eye_grace")
+        fallback = tracker.update(2, 201, EyeEvidence(False, False, None, "missing"), False)
+        self.assertFalse(fallback.sleep_signal)
+        self.assertEqual(fallback.source, "pose")
+
+    def test_invalid_eye_falls_back_to_pose(self) -> None:
+        tracker = HybridEvidenceTracker(eye_sleep_duration_ms=500, pose_sleep_duration_ms=1000)
+        evidence = tracker.update(3, 0, EyeEvidence(False, False, None, "too small"), True)
+        self.assertTrue(evidence.valid)
+        self.assertTrue(evidence.sleep_signal)
+        self.assertEqual(evidence.source, "pose")
+        self.assertEqual(evidence.sleep_duration_ms, 1000)
 
 
 if __name__ == "__main__":

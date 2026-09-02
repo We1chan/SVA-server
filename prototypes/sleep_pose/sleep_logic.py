@@ -61,6 +61,23 @@ class ActivityEvidence:
 
 
 @dataclass(frozen=True)
+class EyeEvidence:
+    valid: bool
+    closed: bool
+    closed_probability: Optional[float]
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class HybridEvidence:
+    valid: bool
+    sleep_signal: bool
+    source: str
+    sleep_duration_ms: int
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class StateUpdate:
     state: SleepState
     changed: bool
@@ -76,6 +93,27 @@ class _TrackRuntime:
     low_since_ms: Optional[int] = None
     normal_since_ms: Optional[int] = None
     invalid_since_ms: Optional[int] = None
+
+
+@dataclass
+class _HybridRuntime:
+    last_eye_ms: int
+    last_eye_closed: bool
+    last_update_ms: int
+
+
+@dataclass
+class _EyeScheduleRuntime:
+    last_probe_ms: Optional[int]
+    active_until_ms: int
+    last_update_ms: int
+
+
+@dataclass(frozen=True)
+class _EyeSample:
+    timestamp_ms: int
+    closed: bool
+    probability: float
 
 
 def _visible_mean(keypoints: np.ndarray, indices: tuple[int, ...], min_confidence: float) -> tuple[Optional[np.ndarray], float]:
@@ -299,6 +337,188 @@ class PoseActivityTracker:
         return expired
 
 
+class EyeInferenceScheduler:
+    """Run sparse eye probes normally and full-rate inference for candidates."""
+
+    def __init__(
+        self,
+        *,
+        probe_interval_ms: int = 200,
+        candidate_hold_ms: int = 1_500,
+        track_timeout_ms: int = 3_000,
+    ) -> None:
+        if min(probe_interval_ms, candidate_hold_ms, track_timeout_ms) <= 0:
+            raise ValueError("eye scheduling durations must be positive")
+        self.probe_interval_ms = probe_interval_ms
+        self.candidate_hold_ms = candidate_hold_ms
+        self.track_timeout_ms = track_timeout_ms
+        self._tracks: dict[int, _EyeScheduleRuntime] = {}
+
+    def should_infer(self, track_id: int, timestamp_ms: int, posture_candidate: bool) -> bool:
+        runtime = self._tracks.get(track_id)
+        if runtime is None:
+            runtime = _EyeScheduleRuntime(None, -1, timestamp_ms)
+            self._tracks[track_id] = runtime
+        runtime.last_update_ms = timestamp_ms
+        if posture_candidate:
+            runtime.active_until_ms = max(runtime.active_until_ms, timestamp_ms + self.candidate_hold_ms)
+        active = timestamp_ms <= runtime.active_until_ms
+        probe_due = runtime.last_probe_ms is None or timestamp_ms - runtime.last_probe_ms >= self.probe_interval_ms
+        if active or probe_due:
+            runtime.last_probe_ms = timestamp_ms
+            return True
+        return False
+
+    def observe(self, track_id: int, timestamp_ms: int, eye: EyeEvidence) -> None:
+        runtime = self._tracks.get(track_id)
+        if runtime is None:
+            runtime = _EyeScheduleRuntime(timestamp_ms, -1, timestamp_ms)
+            self._tracks[track_id] = runtime
+        runtime.last_update_ms = timestamp_ms
+        if eye.valid and eye.closed:
+            runtime.active_until_ms = max(runtime.active_until_ms, timestamp_ms + self.candidate_hold_ms)
+
+    def prune(self, timestamp_ms: int) -> list[int]:
+        expired = [
+            track_id
+            for track_id, runtime in self._tracks.items()
+            if timestamp_ms - runtime.last_update_ms >= self.track_timeout_ms
+        ]
+        for track_id in expired:
+            del self._tracks[track_id]
+        return expired
+
+
+class EyeClosureTracker:
+    """Convert noisy frame classifications into a short-window PERCLOS signal."""
+
+    def __init__(
+        self,
+        *,
+        window_ms: int = 2_000,
+        min_history_ms: int = 800,
+        closed_ratio_threshold: float = 0.60,
+        track_timeout_ms: int = 3_000,
+    ) -> None:
+        if min(window_ms, min_history_ms, track_timeout_ms) <= 0:
+            raise ValueError("eye closure durations must be positive")
+        if min_history_ms > window_ms:
+            raise ValueError("minimum eye history must not exceed the window")
+        if not 0.0 < closed_ratio_threshold <= 1.0:
+            raise ValueError("closed-eye ratio threshold must be in (0, 1]")
+        self.window_ms = window_ms
+        self.min_history_ms = min_history_ms
+        self.closed_ratio_threshold = closed_ratio_threshold
+        self.track_timeout_ms = track_timeout_ms
+        self._samples: dict[int, deque[_EyeSample]] = {}
+        self._last_update_ms: dict[int, int] = {}
+
+    def update(self, track_id: int, timestamp_ms: int, eye: EyeEvidence) -> EyeEvidence:
+        self._last_update_ms[track_id] = timestamp_ms
+        if not eye.valid or eye.closed_probability is None:
+            return eye
+        samples = self._samples.setdefault(track_id, deque())
+        samples.append(_EyeSample(timestamp_ms, eye.closed, eye.closed_probability))
+        cutoff = timestamp_ms - self.window_ms
+        while len(samples) > 1 and samples[0].timestamp_ms < cutoff:
+            samples.popleft()
+        history_ms = timestamp_ms - samples[0].timestamp_ms
+        if history_ms < self.min_history_ms:
+            return EyeEvidence(True, False, eye.closed_probability, "eye closure window warming up")
+        closed_ratio = sum(sample.closed for sample in samples) / len(samples)
+        mean_probability = float(sum(sample.probability for sample in samples) / len(samples))
+        return EyeEvidence(
+            True,
+            closed_ratio >= self.closed_ratio_threshold,
+            mean_probability,
+            f"perclos={closed_ratio:.3f}",
+        )
+
+    def prune(self, timestamp_ms: int) -> list[int]:
+        expired = [
+            track_id
+            for track_id, last_update_ms in self._last_update_ms.items()
+            if timestamp_ms - last_update_ms >= self.track_timeout_ms
+        ]
+        for track_id in expired:
+            self._last_update_ms.pop(track_id, None)
+            self._samples.pop(track_id, None)
+        return expired
+
+
+class HybridEvidenceTracker:
+    """Prefer reliable eye state, then fall back to conservative pose evidence.
+
+    The last reliable eye observation is retained briefly so a single missed
+    frame does not switch evidence sources or reset a sustained eye closure.
+    """
+
+    def __init__(
+        self,
+        *,
+        eye_sleep_duration_ms: int = 5_000,
+        pose_sleep_duration_ms: int = 10_000,
+        eye_grace_ms: int = 1_500,
+        track_timeout_ms: int = 3_000,
+    ) -> None:
+        if min(eye_sleep_duration_ms, pose_sleep_duration_ms, eye_grace_ms, track_timeout_ms) <= 0:
+            raise ValueError("hybrid evidence durations must be positive")
+        self.eye_sleep_duration_ms = eye_sleep_duration_ms
+        self.pose_sleep_duration_ms = pose_sleep_duration_ms
+        self.eye_grace_ms = eye_grace_ms
+        self.track_timeout_ms = track_timeout_ms
+        self._tracks: dict[int, _HybridRuntime] = {}
+
+    def update(
+        self,
+        track_id: int,
+        timestamp_ms: int,
+        eye: EyeEvidence,
+        pose_signal: Optional[bool],
+    ) -> HybridEvidence:
+        runtime = self._tracks.get(track_id)
+        if eye.valid:
+            self._tracks[track_id] = _HybridRuntime(timestamp_ms, eye.closed, timestamp_ms)
+            return HybridEvidence(
+                True,
+                eye.closed,
+                "eye",
+                self.eye_sleep_duration_ms,
+                eye.reason,
+            )
+
+        if runtime is not None:
+            runtime.last_update_ms = timestamp_ms
+            if timestamp_ms - runtime.last_eye_ms <= self.eye_grace_ms:
+                return HybridEvidence(
+                    True,
+                    runtime.last_eye_closed,
+                    "eye_grace",
+                    self.eye_sleep_duration_ms,
+                    eye.reason or "eye observation temporarily unavailable",
+                )
+
+        if pose_signal is not None:
+            return HybridEvidence(
+                True,
+                pose_signal,
+                "pose",
+                self.pose_sleep_duration_ms,
+                eye.reason,
+            )
+        return HybridEvidence(False, False, "none", self.pose_sleep_duration_ms, eye.reason)
+
+    def prune(self, timestamp_ms: int) -> list[int]:
+        expired = [
+            track_id
+            for track_id, runtime in self._tracks.items()
+            if timestamp_ms - runtime.last_update_ms >= self.track_timeout_ms
+        ]
+        for track_id in expired:
+            del self._tracks[track_id]
+        return expired
+
+
 class SleepStateMachine:
     """Per-track temporal filter for transient low-head suppression."""
 
@@ -340,7 +560,18 @@ class SleepStateMachine:
         runtime.invalid_since_ms = None
         return changed
 
-    def update(self, track_id: int, timestamp_ms: int, low_head: Optional[bool]) -> StateUpdate:
+    def update(
+        self,
+        track_id: int,
+        timestamp_ms: int,
+        low_head: Optional[bool],
+        *,
+        sleep_duration_ms: Optional[int] = None,
+        suspect_signal: Optional[bool] = None,
+    ) -> StateUpdate:
+        required_sleep_ms = self.sleep_duration_ms if sleep_duration_ms is None else sleep_duration_ms
+        if required_sleep_ms <= 0:
+            raise ValueError("sleep duration must be positive")
         runtime = self._runtime(track_id, timestamp_ms)
         runtime.last_update_ms = timestamp_ms
         changed = False
@@ -354,19 +585,25 @@ class SleepStateMachine:
             return StateUpdate(runtime.state, changed, False, timestamp_ms - runtime.state_since_ms)
 
         runtime.invalid_since_ms = None
+        candidate_signal = low_head if suspect_signal is None else suspect_signal
 
         if runtime.state == SleepState.NORMAL:
-            if low_head:
-                runtime.low_since_ms = timestamp_ms
+            if candidate_signal:
+                runtime.low_since_ms = timestamp_ms if low_head else None
                 changed = self._set_state(runtime, SleepState.SUSPECTED, timestamp_ms)
 
         elif runtime.state == SleepState.SUSPECTED:
-            if not low_head:
+            if not candidate_signal:
                 changed = self._reset(runtime, timestamp_ms)
-            elif runtime.low_since_ms is not None and timestamp_ms - runtime.low_since_ms >= self.sleep_duration_ms:
-                changed = self._set_state(runtime, SleepState.SLEEPING, timestamp_ms)
-                sleep_event = changed
-                runtime.normal_since_ms = None
+            elif low_head:
+                if runtime.low_since_ms is None:
+                    runtime.low_since_ms = timestamp_ms
+                elif timestamp_ms - runtime.low_since_ms >= required_sleep_ms:
+                    changed = self._set_state(runtime, SleepState.SLEEPING, timestamp_ms)
+                    sleep_event = changed
+                    runtime.normal_since_ms = None
+            else:
+                runtime.low_since_ms = None
 
         elif runtime.state == SleepState.SLEEPING:
             if not low_head:
