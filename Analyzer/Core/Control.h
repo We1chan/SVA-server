@@ -307,6 +307,10 @@ namespace SVAAnalyzer
 			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
 				return static_cast<char>(std::tolower(c));
 			});
+			if (value == "sleep_duty")
+			{
+				return "sleep";
+			}
 			if (value == "cross_line" || value == "enter_region" || value == "exit_region" || value == "dwell" ||
 				value == "low_speed" || value == "loitering" || value == "sleep" || value == "absence" || value == "count_threshold" || value == "occupancy" || value == "region_motion" ||
 				value == "direction_move" || value == "direction_reverse" || value == "relation_near" || value == "relation_apart" || value == "relation_not_contains" || value == "fight")
@@ -681,19 +685,21 @@ namespace SVAAnalyzer
 				{
 					rule.direction = item["crossingDirection"].asString();
 				}
-				if (item["thresholdMs"].isInt64())
+				const Json::Value &duration = item.isMember("thresholdMs")
+					? item["thresholdMs"] : item["durationMs"];
+				if (duration.isInt64())
 				{
-					rule.thresholdMs = item["thresholdMs"].asInt64();
+					rule.thresholdMs = duration.asInt64();
 				}
-				else if (item["thresholdMs"].isInt())
+				else if (duration.isInt())
 				{
-					rule.thresholdMs = static_cast<int64_t>(item["thresholdMs"].asInt());
+					rule.thresholdMs = static_cast<int64_t>(duration.asInt());
 				}
-				else if (item["thresholdMs"].isString())
+				else if (duration.isString())
 				{
 					try
 					{
-						rule.thresholdMs = std::stoll(item["thresholdMs"].asString());
+						rule.thresholdMs = std::stoll(duration.asString());
 					}
 					catch (...)
 					{

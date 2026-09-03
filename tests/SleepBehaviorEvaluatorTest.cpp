@@ -42,6 +42,28 @@ namespace
 
 int main()
 {
+    // The business API sends sleep_duty + durationMs. It must survive config
+    // normalization and honor the requested duration instead of being discarded.
+    Control businessControl = sleepControl();
+    Json::Value rules(Json::arrayValue);
+    Json::Value rule;
+    rule["id"] = "business-sleep";
+    rule["behaviorType"] = "sleep_duty";
+    rule["geometryId"] = "region_primary";
+    rule["ruleObjectCode"] = "person";
+    rule["durationMs"] = 45000;
+    rules.append(rule);
+    assert(businessControl.loadBehaviorRulesConfig(rules));
+    assert(businessControl.behaviorRules.size() == 1);
+    assert(businessControl.behaviorRules.front().behaviorType == "sleep");
+    assert(businessControl.behaviorRules.front().thresholdMs == 45000);
+
+    rule["durationMs"] = "60000";
+    rule["thresholdMs"] = 30000;
+    rules[0] = rule;
+    assert(businessControl.loadBehaviorRulesConfig(rules));
+    assert(businessControl.behaviorRules.front().thresholdMs == 30000);
+
     const Control control = sleepControl();
     DetectObject detect = trackedPerson();
     detect.sleepEvidenceEvaluated = true;
