@@ -737,7 +737,7 @@ namespace SVAAnalyzer
                                 // 时态追踪：给每个检测框分配 trackId，计算速度/轨迹/区域状态
                                 const int64_t behaviorTimestampMs = getCurTime();
                                 mScheduler->updateTemporalTracks(control, control.streamCode, detectPtrs, behaviorTimestampMs);
-                                mScheduler->updateSleepDetection(control.streamCode, image, detectPtrs, behaviorTimestampMs);
+                                mScheduler->updateSleepDetection(control, control.streamCode, image, detectPtrs, behaviorTimestampMs);
                                 
                                 // 步骤2: 对每个追踪到的目标做原子行为规则评估
                                 for (size_t di = 0; di < happenDetects.size(); ++di)

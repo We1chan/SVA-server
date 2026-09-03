@@ -33,7 +33,8 @@ namespace SVAAnalyzer
         void process(const std::string &streamCode,
                      cv::Mat &image,
                      const std::vector<DetectObject *> &detects,
-                     int64_t timestampMs);
+                     int64_t timestampMs,
+                     int64_t poseSleepDurationMs);
         void clearStream(const std::string &streamCode);
         bool eyeModelAvailable() const;
 

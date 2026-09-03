@@ -192,7 +192,7 @@ namespace SVAAnalyzer
         if (algorithmCode == "on_yolo11n_pose_sleep")
         {
             mDecoder = YoloOutputDecoder::PoseDenseWithNms;
-            LOGI("AlgorithmOnYolo profile=%s decoder=pose_dense_with_nms preprocess=center_letterbox_rgb score=0.35 nms=0.70", algorithmCode.data());
+            LOGI("AlgorithmOnYolo profile=%s decoder=pose_dense_with_nms preprocess=center_letterbox_rgb candidate_score=0.10 nms=0.70", algorithmCode.data());
             return;
         }
         if (algorithmCode == "on_yolo26n_80" || algorithmCode == "ov_yolo26n_80")
@@ -215,7 +215,12 @@ namespace SVAAnalyzer
         constexpr int poseChannels = 56;
         constexpr int keypointStart = 5;
         constexpr int keypointCount = 17;
-        constexpr float scoreThreshold = 0.35f;
+        // Keep a low, model-wide candidate floor here.  The same ONNX engine is
+        // shared by multiple controls, so the user-facing per-task threshold is
+        // applied later in Analyzer::runAlgorithmTask.  Using the old 0.35 value
+        // here permanently discarded distant and desk-occluded people before a
+        // task could apply its configured threshold.
+        constexpr float scoreThreshold = 0.10f;
         constexpr float nmsThreshold = 0.70f;
         if (mOutputDim != poseChannels || scale <= 0.0f)
         {

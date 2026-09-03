@@ -330,7 +330,8 @@ namespace SVAAnalyzer
 								  const std::string &streamCode,
 								  std::vector<DetectObject *> detects,
 								  int64_t timestampMs);
-		void updateSleepDetection(const std::string &streamCode,
+		void updateSleepDetection(const Control &control,
+							  const std::string &streamCode,
 							  cv::Mat &image,
 							  const std::vector<DetectObject *> &detects,
 							  int64_t timestampMs);

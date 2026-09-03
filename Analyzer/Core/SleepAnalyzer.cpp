@@ -129,20 +129,6 @@ namespace SVAAnalyzer
             return rect;
         }
 
-        bool strictPoseSignal(const PoseEvidence &pose, const ActivityEvidence &activity)
-        {
-            if (!pose.valid || !activity.valid || !activity.inactive)
-            {
-                return false;
-            }
-            if (pose.postureMode == "desk_rest")
-            {
-                return pose.faceBelowShoulderRatio.has_value() && *pose.faceBelowShoulderRatio >= 0.08f &&
-                       pose.headToWristRatio.has_value() && *pose.headToWristRatio <= 0.25f;
-            }
-            return pose.pitchProxyDeg.has_value() && *pose.pitchProxyDeg >= 35.0f &&
-                   pose.headOffsetDeg.has_value() && std::abs(*pose.headOffsetDeg) <= 50.0f;
-        }
     }
 
     class SleepAnalyzer::Impl
@@ -164,10 +150,11 @@ namespace SVAAnalyzer
 
         struct StreamRuntime
         {
-            PoseActivityTracker activity;
+            PoseActivityTracker activity{3000, 1500, 0.35f, 0.35f, 3000};
+            PoseFallbackTracker poseFallback;
             EyeInferenceScheduler eyeScheduler;
             EyeClosureTracker eyeClosure;
-            HybridEvidenceTracker hybrid;
+            HybridEvidenceTracker hybrid{3000, 5000, 1500, 3000};
             SleepStateMachine state;
         };
 
@@ -211,7 +198,8 @@ namespace SVAAnalyzer
         void process(const std::string &streamCode,
                      cv::Mat &image,
                      const std::vector<DetectObject *> &detects,
-                     int64_t timestampMs)
+                     int64_t timestampMs,
+                     int64_t poseSleepDurationMs)
         {
             std::lock_guard<std::mutex> lock(mMutex);
             StreamRuntime &runtime = mStreams[streamCode];
@@ -225,8 +213,21 @@ namespace SVAAnalyzer
                 const int trackId = detect->trackId;
                 const PoseEvidence pose = estimateHeadPose(detect->poseKeypoints);
                 const ActivityEvidence activity = runtime.activity.update(trackId, timestampMs, detect->poseKeypoints);
-                const bool postureCandidate = pose.valid && pose.lowHead;
-                const bool strictPose = strictPoseSignal(pose, activity);
+                const bool rawPostureCandidate = pose.valid && pose.lowHead;
+                const bool requireCollapsedPose = poseSleepDurationMs >= 15000;
+                const bool rawStrictPose = strictSleepPoseSignal(pose, activity, requireCollapsedPose);
+                const PoseTemporalEvidence poseTemporal = runtime.poseFallback.update(trackId,
+                                                                                       timestampMs,
+                                                                                       rawPostureCandidate,
+                                                                                       rawStrictPose);
+                const bool postureCandidate = poseTemporal.valid ? poseTemporal.candidate : rawPostureCandidate;
+                // The temporal ratio recovers intermittent distant keypoints
+                // for short/demo clips.  A long production fallback must also
+                // be strict on the current frame so that any observed writing
+                // motion resets the confirmation timer instead of being
+                // masked by old samples in the eight-second window.
+                const bool strictPose = poseTemporal.valid && poseTemporal.strict &&
+                                        (!requireCollapsedPose || rawStrictPose);
 
                 EyeEvidence eye{false, false, std::nullopt, "eye probe not scheduled"};
                 RawEyeResult raw;
@@ -240,14 +241,32 @@ namespace SVAAnalyzer
                                                                      timestampMs,
                                                                      eye,
                                                                      pose.valid ? std::optional<bool>(strictPose) : std::nullopt);
+                const int64_t requiredSleepDurationMs = hybrid.source == "pose"
+                                                            ? poseSleepDurationMs
+                                                            : hybrid.sleepDurationMs;
                 const bool suspect = hybrid.source == "eye" || hybrid.source == "eye_grace"
                                          ? hybrid.sleepSignal
                                          : postureCandidate;
                 const SleepStateUpdate state = runtime.state.update(trackId,
                                                                      timestampMs,
                                                                      hybrid.valid ? std::optional<bool>(hybrid.sleepSignal) : std::nullopt,
-                                                                     hybrid.sleepDurationMs,
+                                                                     requiredSleepDurationMs,
                                                                      suspect);
+                if (state.sleepEvent)
+                {
+                    LOGI("sleep confirmed stream=%s track=%d source=%s durationMs=%lld posture=%s "
+                         "pitch=%.3f faceBelowShoulder=%.3f headToWrist=%.3f shoulderWidth=%.3f activity=%.3f",
+                         streamCode.c_str(),
+                         trackId,
+                         hybrid.source.c_str(),
+                         static_cast<long long>(requiredSleepDurationMs),
+                         pose.postureMode.c_str(),
+                         pose.pitchProxyDeg.value_or(-1.0f),
+                         pose.faceBelowShoulderRatio.value_or(-99.0f),
+                         pose.headToWristRatio.value_or(-1.0f),
+                         pose.shoulderWidthPx.value_or(-1.0f),
+                         activity.score.value_or(-1.0f));
+                }
 
                 detect->sleepEvidenceEvaluated = true;
                 detect->postureCandidate = postureCandidate;
@@ -265,6 +284,7 @@ namespace SVAAnalyzer
             runtime.activity.prune(timestampMs);
             runtime.eyeScheduler.prune(timestampMs);
             runtime.eyeClosure.prune(timestampMs);
+            runtime.poseFallback.prune(timestampMs);
             runtime.hybrid.prune(timestampMs);
             runtime.state.prune(timestampMs);
         }
@@ -284,9 +304,10 @@ namespace SVAAnalyzer
     void SleepAnalyzer::process(const std::string &streamCode,
                                 cv::Mat &image,
                                 const std::vector<DetectObject *> &detects,
-                                int64_t timestampMs)
+                                int64_t timestampMs,
+                                int64_t poseSleepDurationMs)
     {
-        mImpl->process(streamCode, image, detects, timestampMs);
+        mImpl->process(streamCode, image, detects, timestampMs, poseSleepDurationMs);
     }
 
     void SleepAnalyzer::clearStream(const std::string &streamCode)

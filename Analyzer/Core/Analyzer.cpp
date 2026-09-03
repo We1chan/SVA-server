@@ -240,6 +240,25 @@ namespace SVAAnalyzer
             algorithm->objectDetect(image, taskDetects);
         }
 
+        // ONNX models are shared between controls. Decode pose candidates with a
+        // conservative engine-wide floor, then enforce each control's threshold
+        // here so changing one deployment never mutates another deployment's
+        // model state.  Sleep pose defaults to the calibrated 0.15 when an older
+        // payload does not carry scoreThreshold.
+        const float effectiveScoreThreshold = task.scoreThresholdSet
+                                                  ? task.scoreThreshold
+                                                  : (algorithmCode == "on_yolo11n_pose_sleep" ? 0.15f : 0.0f);
+        if (effectiveScoreThreshold > 0.0f)
+        {
+            taskDetects.erase(
+                std::remove_if(taskDetects.begin(), taskDetects.end(),
+                               [effectiveScoreThreshold](const DetectObject &detect)
+                               {
+                                   return detect.class_score < effectiveScoreThreshold;
+                               }),
+                taskDetects.end());
+        }
+
         if (taskDetects.empty())
         {
             return true;

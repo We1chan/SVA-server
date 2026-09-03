@@ -4,6 +4,9 @@
 
 int main()
 {
+	assert(SVAAnalyzer::Control::normalizeBehaviorTypeValue("sleep_duty") == "sleep");
+	assert(SVAAnalyzer::Control::normalizeBehaviorTypeValue("SLEEP_DUTY") == "sleep");
+
 	SVAAnalyzer::Control control;
 	control.code = "legacy-dwell-test";
 	control.streamUrl = "rtsp://127.0.0.1:9994/live/test";

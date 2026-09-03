@@ -39,7 +39,11 @@ namespace SVAAnalyzer
         int videoHeight = control->videoHeight;
         int videoFps = control->videoFps;
 
-        if (avformat_alloc_output_context2(&mFmtCtx, NULL, "rtsp", pushStreamUrl.data()) < 0)
+        // The backend publishes rendered streams over RTMP.  Using the RTSP
+        // muxer for an rtmp:// URL makes the control look healthy while no
+        // playable algorithm stream is registered in ZLM.
+        const char *outputFormat = pushStreamUrl.rfind("rtmp://", 0) == 0 ? "flv" : "rtsp";
+        if (avformat_alloc_output_context2(&mFmtCtx, NULL, outputFormat, pushStreamUrl.data()) < 0)
         {
             LOGI("avformat_alloc_output_context2 error: pushStreamUrl=%s", pushStreamUrl.data());
             return false;

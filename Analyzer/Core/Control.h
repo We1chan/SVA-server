@@ -307,6 +307,10 @@ namespace SVAAnalyzer
 			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
 				return static_cast<char>(std::tolower(c));
 			});
+			// The business API and UI expose the canonical alarm label
+			// "sleep_duty" while the analyzer evaluates the atomic behavior
+			// "sleep". Accept both so tasks created through SVA use the same
+			// hybrid pose/eye state machine as direct analyzer controls.
 			if (value == "sleep_duty")
 			{
 				return "sleep";

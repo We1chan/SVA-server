@@ -1,6 +1,7 @@
 #include "SleepDetection.h"
 
 #include <cassert>
+#include <cmath>
 #include <iostream>
 
 using namespace SVAAnalyzer;
@@ -103,6 +104,66 @@ namespace
         assert(result.reason == "perclos=0.750");
     }
 
+    void testPoseFallbackTemporalRatios()
+    {
+        PoseFallbackTracker tracker(8000, 3000, 0.35f, 0.15f, 3000);
+        PoseTemporalEvidence evidence;
+        for (int index = 0; index <= 16; ++index)
+        {
+            const bool candidate = index % 2 == 0;
+            const bool strict = index % 5 == 0;
+            evidence = tracker.update(7, index * 500, candidate, strict);
+        }
+        assert(evidence.valid);
+        assert(evidence.candidate);
+        assert(evidence.strict);
+
+        PoseFallbackTracker normal(8000, 3000, 0.35f, 0.15f, 3000);
+        for (int index = 0; index <= 16; ++index)
+        {
+            evidence = normal.update(8, index * 500, index == 0, false);
+        }
+        assert(evidence.valid);
+        assert(!evidence.candidate);
+        assert(!evidence.strict);
+    }
+
+    void testAdaptiveActivityThreshold()
+    {
+        assert(std::abs(sleepActivityThreshold(std::nullopt) - 0.35f) < 0.0001f);
+        assert(std::abs(sleepActivityThreshold(79.9f) - 0.35f) < 0.0001f);
+        assert(std::abs(sleepActivityThreshold(80.0f) - 0.18f) < 0.0001f);
+    }
+
+    void testStrictPoseGeometryAndActivity()
+    {
+        ActivityEvidence inactive{true, 0.10f, true, ""};
+
+        PoseEvidence writing;
+        writing.valid = true;
+        writing.lowHead = true;
+        writing.pitchProxyDeg = 52.0f;
+        writing.headOffsetDeg = 0.0f;
+        writing.shoulderWidthPx = 120.0f;
+        writing.faceBelowShoulderRatio = -0.30f;
+        writing.postureMode = "head_pitch";
+        assert(strictSleepPoseSignal(writing, inactive));
+        assert(!strictSleepPoseSignal(writing, inactive, true));
+
+        PoseEvidence collapsed = writing;
+        collapsed.faceBelowShoulderRatio = -0.02f;
+        assert(strictSleepPoseSignal(collapsed, inactive, true));
+
+        ActivityEvidence moving{true, 0.30f, true, ""};
+        assert(!strictSleepPoseSignal(writing, moving));
+
+        PoseEvidence deskRest = writing;
+        deskRest.postureMode = "desk_rest";
+        deskRest.faceBelowShoulderRatio = 0.10f;
+        deskRest.headToWristRatio = 0.20f;
+        assert(strictSleepPoseSignal(deskRest, inactive, true));
+    }
+
     void testHybridPriorityAndGrace()
     {
         HybridEvidenceTracker tracker(3000, 15000, 1500, 3000);
@@ -161,6 +222,9 @@ int main()
     testActivity();
     testEyeSchedule();
     testPerclos();
+    testPoseFallbackTemporalRatios();
+    testAdaptiveActivityThreshold();
+    testStrictPoseGeometryAndActivity();
     testHybridPriorityAndGrace();
     testSuspectRequiresConfirmation();
     testRecoveryAndSingleEvent();

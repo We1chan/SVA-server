@@ -2060,14 +2060,24 @@ namespace SVAAnalyzer
         TemporalProcessor::updateStream(context, control, detects, timestampMs);
     }
 
-    void Scheduler::updateSleepDetection(const std::string &streamCode,
+    void Scheduler::updateSleepDetection(const Control &control,
+                                         const std::string &streamCode,
                                          cv::Mat &image,
                                          const std::vector<DetectObject *> &detects,
                                          int64_t timestampMs)
     {
         if (mSleepAnalyzer)
         {
-            mSleepAnalyzer->process(streamCode, image, detects, timestampMs);
+            int64_t poseSleepDurationMs = 15000;
+            for (const BehaviorRuleConfig &rule : control.behaviorRules)
+            {
+                if (rule.enabled && rule.behaviorType == "sleep" && rule.thresholdMs > 0)
+                {
+                    poseSleepDurationMs = rule.thresholdMs;
+                    break;
+                }
+            }
+            mSleepAnalyzer->process(streamCode, image, detects, timestampMs, poseSleepDurationMs);
         }
     }
 

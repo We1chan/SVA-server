@@ -47,6 +47,16 @@ namespace SVAAnalyzer
                                   float deskRestFaceRatio = 0.04f,
                                   float deskRestWristRatio = 0.35f);
 
+    float sleepActivityThreshold(std::optional<float> shoulderWidthPx,
+                                 float distantShoulderWidthPx = 80.0f,
+                                 float nearFieldThreshold = 0.18f,
+                                 float distantThreshold = 0.35f);
+
+    /** Conservative instantaneous pose evidence used by the timed fallback. */
+    bool strictSleepPoseSignal(const PoseEvidence &pose,
+                               const ActivityEvidence &activity,
+                               bool requireCollapsedPose = false);
+
     class PoseActivityTracker
     {
     public:
@@ -159,6 +169,48 @@ namespace SVAAnalyzer
         int64_t mWindowMs;
         int64_t mMinHistoryMs;
         float mClosedRatioThreshold;
+        int64_t mTrackTimeoutMs;
+        std::unordered_map<int, std::deque<Sample>> mSamples;
+        std::unordered_map<int, int64_t> mLastUpdateMs;
+    };
+
+    struct PoseTemporalEvidence
+    {
+        bool valid = false;
+        bool candidate = false;
+        bool strict = false;
+        float candidateRatio = 0.0f;
+        float strictRatio = 0.0f;
+    };
+
+    /** Smooths noisy distant-camera pose evidence over a time window. */
+    class PoseFallbackTracker
+    {
+    public:
+        PoseFallbackTracker(int64_t windowMs = 8000,
+                            int64_t minHistoryMs = 3000,
+                            float candidateRatioThreshold = 0.35f,
+                            float strictRatioThreshold = 0.15f,
+                            int64_t trackTimeoutMs = 3000);
+
+        PoseTemporalEvidence update(int trackId,
+                                    int64_t timestampMs,
+                                    bool candidate,
+                                    bool strict);
+        std::vector<int> prune(int64_t timestampMs);
+
+    private:
+        struct Sample
+        {
+            int64_t timestampMs = 0;
+            bool candidate = false;
+            bool strict = false;
+        };
+
+        int64_t mWindowMs;
+        int64_t mMinHistoryMs;
+        float mCandidateRatioThreshold;
+        float mStrictRatioThreshold;
         int64_t mTrackTimeoutMs;
         std::unordered_map<int, std::deque<Sample>> mSamples;
         std::unordered_map<int, int64_t> mLastUpdateMs;

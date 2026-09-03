@@ -191,6 +191,52 @@ namespace SVAAnalyzer
                 headToWristRatio};
     }
 
+    float sleepActivityThreshold(std::optional<float> shoulderWidthPx,
+                                 float distantShoulderWidthPx,
+                                 float nearFieldThreshold,
+                                 float distantThreshold)
+    {
+        return shoulderWidthPx.has_value() && *shoulderWidthPx >= distantShoulderWidthPx
+                   ? nearFieldThreshold
+                   : distantThreshold;
+    }
+
+    bool strictSleepPoseSignal(const PoseEvidence &pose,
+                               const ActivityEvidence &activity,
+                               bool requireCollapsedPose)
+    {
+        if (!pose.valid || !activity.valid || !activity.inactive)
+        {
+            return false;
+        }
+
+        const float activityThreshold = sleepActivityThreshold(pose.shoulderWidthPx);
+        if (!activity.score.has_value() || *activity.score > activityThreshold)
+        {
+            return false;
+        }
+        if (pose.postureMode == "desk_rest")
+        {
+            return pose.faceBelowShoulderRatio.has_value() && *pose.faceBelowShoulderRatio >= 0.08f &&
+                   pose.headToWristRatio.has_value() && *pose.headToWristRatio <= 0.25f;
+        }
+
+        if (requireCollapsedPose)
+        {
+            // Long-running production scenes contain people who can read or
+            // write almost motionlessly for many seconds.  Without usable eye
+            // crops, a long-duration rule therefore also requires the face to
+            // have collapsed to the shoulder line instead of ordinary gaze
+            // down toward a book.
+            return pose.pitchProxyDeg.has_value() && *pose.pitchProxyDeg >= 45.0f &&
+                   pose.faceBelowShoulderRatio.has_value() && *pose.faceBelowShoulderRatio >= -0.05f &&
+                   pose.headOffsetDeg.has_value() && std::abs(*pose.headOffsetDeg) <= 50.0f;
+        }
+
+        return pose.pitchProxyDeg.has_value() && *pose.pitchProxyDeg >= 28.0f &&
+               pose.headOffsetDeg.has_value() && std::abs(*pose.headOffsetDeg) <= 50.0f;
+    }
+
     PoseActivityTracker::PoseActivityTracker(int64_t windowMs,
                                              int64_t minHistoryMs,
                                              float minConfidence,
@@ -446,6 +492,85 @@ namespace SVAAnalyzer
     }
 
     std::vector<int> EyeClosureTracker::prune(int64_t timestampMs)
+    {
+        std::vector<int> expired;
+        for (auto iterator = mLastUpdateMs.begin(); iterator != mLastUpdateMs.end();)
+        {
+            if (timestampMs - iterator->second >= mTrackTimeoutMs)
+            {
+                expired.push_back(iterator->first);
+                mSamples.erase(iterator->first);
+                iterator = mLastUpdateMs.erase(iterator);
+            }
+            else
+            {
+                ++iterator;
+            }
+        }
+        return expired;
+    }
+
+    PoseFallbackTracker::PoseFallbackTracker(int64_t windowMs,
+                                             int64_t minHistoryMs,
+                                             float candidateRatioThreshold,
+                                             float strictRatioThreshold,
+                                             int64_t trackTimeoutMs)
+        : mWindowMs(windowMs),
+          mMinHistoryMs(minHistoryMs),
+          mCandidateRatioThreshold(candidateRatioThreshold),
+          mStrictRatioThreshold(strictRatioThreshold),
+          mTrackTimeoutMs(trackTimeoutMs)
+    {
+        requirePositive(mWindowMs, "pose fallback window");
+        requirePositive(mMinHistoryMs, "pose fallback minimum history");
+        requirePositive(mTrackTimeoutMs, "pose fallback track timeout");
+        if (mMinHistoryMs > mWindowMs)
+        {
+            throw std::invalid_argument("pose fallback minimum history must not exceed the window");
+        }
+        if (mCandidateRatioThreshold <= 0.0f || mCandidateRatioThreshold > 1.0f ||
+            mStrictRatioThreshold <= 0.0f || mStrictRatioThreshold > 1.0f)
+        {
+            throw std::invalid_argument("pose fallback ratio thresholds must be in (0, 1]");
+        }
+    }
+
+    PoseTemporalEvidence PoseFallbackTracker::update(int trackId,
+                                                     int64_t timestampMs,
+                                                     bool candidate,
+                                                     bool strict)
+    {
+        std::deque<Sample> &samples = mSamples[trackId];
+        samples.push_back({timestampMs, candidate, strict});
+        mLastUpdateMs[trackId] = timestampMs;
+        const int64_t cutoff = timestampMs - mWindowMs;
+        while (samples.size() > 1 && samples.front().timestampMs < cutoff)
+        {
+            samples.pop_front();
+        }
+
+        PoseTemporalEvidence result;
+        if (timestampMs - samples.front().timestampMs < mMinHistoryMs)
+        {
+            return result;
+        }
+
+        size_t candidateCount = 0;
+        size_t strictCount = 0;
+        for (const Sample &sample : samples)
+        {
+            candidateCount += sample.candidate ? 1 : 0;
+            strictCount += sample.strict ? 1 : 0;
+        }
+        result.valid = true;
+        result.candidateRatio = static_cast<float>(candidateCount) / static_cast<float>(samples.size());
+        result.strictRatio = static_cast<float>(strictCount) / static_cast<float>(samples.size());
+        result.candidate = result.candidateRatio >= mCandidateRatioThreshold;
+        result.strict = result.strictRatio >= mStrictRatioThreshold;
+        return result;
+    }
+
+    std::vector<int> PoseFallbackTracker::prune(int64_t timestampMs)
     {
         std::vector<int> expired;
         for (auto iterator = mLastUpdateMs.begin(); iterator != mLastUpdateMs.end();)
