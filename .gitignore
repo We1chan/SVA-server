@@ -1,0 +1,19 @@
+# Build outputs
+build/
+build-cpu/
+build-gpu/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Logs / temp
+*.log
+tmp/
