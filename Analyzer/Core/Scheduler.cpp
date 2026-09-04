@@ -230,15 +230,15 @@ namespace SVAAnalyzer
         }
     }
 
-    int Scheduler::apiControls(std::vector<Control *> &controls)
+    int Scheduler::apiControls(std::vector<Control> &controls)
     {
         int len = 0;
 
         mWorkerMapMtx.lock();
         for (auto f = mWorkerMap.begin(); f != mWorkerMap.end(); ++f)
         {
-            Control *control = f->second->getControl(f->first);
-            if (control)
+            Control control;
+            if (f->second->getControlSnapshot(f->first, control))
             {
                 ++len;
                 controls.push_back(control);
@@ -248,20 +248,13 @@ namespace SVAAnalyzer
 
         return len;
     }
-    Control *Scheduler::apiControl(std::string &code)
+    bool Scheduler::apiControlSnapshot(const std::string &code, Control &snapshot)
     {
-        Control *control = nullptr;
         mWorkerMapMtx.lock();
-        for (auto f = mWorkerMap.begin(); f != mWorkerMap.end(); ++f)
-        {
-            if (f->first == code)
-            {
-                control = f->second->getControl(code);
-            }
-        }
+        auto it = mWorkerMap.find(code);
+        Worker *worker = it == mWorkerMap.end() ? nullptr : it->second;
         mWorkerMapMtx.unlock();
-
-        return control;
+        return worker && worker->getControlSnapshot(code, snapshot);
     }
 
     void Scheduler::apiControlAdd(Control *control, int &result_code, std::string &result_msg)
@@ -339,6 +332,26 @@ namespace SVAAnalyzer
             }
         }
     }
+
+    bool Scheduler::apiControlLiveOutput(const std::string &code,
+                                         bool videoEnabled,
+                                         bool liveEventEnabled,
+                                         float wsEventFps,
+                                         const std::string &pushStreamUrl,
+                                         std::string &result_msg)
+    {
+        Control lookup;
+        lookup.code = code;
+        Worker *worker = getWorker(&lookup);
+        if (!worker)
+        {
+            result_msg = "there is no such control";
+            return false;
+        }
+        return worker->updateControlOutput(code, videoEnabled, liveEventEnabled,
+                                           wsEventFps, pushStreamUrl, result_msg);
+    }
+
     void Scheduler::apiControlCancel(Control *control, int &result_code, std::string &result_msg)
     {
 
@@ -430,8 +443,15 @@ namespace SVAAnalyzer
                 return false;
             }
             worker = f->second;
-            Control *runningControl = worker->getControl(control->code);
-            streamKey = getWorkerStreamKey(runningControl ? runningControl : control);
+            Control runningControl;
+            if (worker->getControlSnapshot(control->code, runningControl))
+            {
+                streamKey = getWorkerStreamKey(&runningControl);
+            }
+            else
+            {
+                streamKey = getWorkerStreamKey(control);
+            }
             mWorkerMap.erase(f);
         }
 

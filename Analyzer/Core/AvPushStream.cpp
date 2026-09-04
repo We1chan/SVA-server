@@ -7,6 +7,7 @@
 #include "Worker.h"
 #include "Analyzer.h"
 #include <cstdio>
+#include <chrono>
 extern "C"
 {
 #include "libswscale/swscale.h"
@@ -17,6 +18,28 @@ extern "C"
 
 namespace SVAAnalyzer
 {
+    int AvPushStream::ioInterruptCallback(void *opaque)
+    {
+        AvPushStream *stream = static_cast<AvPushStream *>(opaque);
+        if (!stream)
+        {
+            return 1;
+        }
+        if (stream->mStopped.load())
+        {
+            return 1;
+        }
+        const int64_t deadline = stream->mIoDeadlineMs.load();
+        if (deadline <= 0)
+        {
+            return 0;
+        }
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        return now >= deadline ? 1 : 0;
+    }
+
     AvPushStream::AvPushStream(Worker *worker, Control *control) : mWorker(worker), mControl(control)
     {
         LOGI("");
@@ -32,6 +55,9 @@ namespace SVAAnalyzer
     bool AvPushStream::connect()
     {
         mStopped = false;
+        mIoDeadlineMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count() + 10000;
 
         Control *control = mControl ? mControl : mWorker->mControl;
         std::string pushStreamUrl = control->pushStreamUrl;
@@ -187,6 +213,8 @@ namespace SVAAnalyzer
         // open output url
         if (!(mFmtCtx->oformat->flags & AVFMT_NOFILE))
         {
+            mFmtCtx->interrupt_callback.callback = &AvPushStream::ioInterruptCallback;
+            mFmtCtx->interrupt_callback.opaque = this;
             if (avio_open(&mFmtCtx->pb, pushStreamUrl.data(), AVIO_FLAG_WRITE) < 0)
             {
                 LOGI("avio_open error: pushStreamUrl=%s", pushStreamUrl.data());
@@ -211,6 +239,8 @@ namespace SVAAnalyzer
             LOGI("avformat_write_header error: pushStreamUrl=%s", pushStreamUrl.data());
             return false;
         }
+
+        mIoDeadlineMs = 0;
 
         mConnectCount++;
 
@@ -324,6 +354,7 @@ namespace SVAAnalyzer
     void AvPushStream::notifyStop()
     {
         mStopped = true;
+        mIoDeadlineMs = 0;
         mVideoFrameQ_cv.notify_all();
     }
     void AvPushStream::handleEncodeVideo()

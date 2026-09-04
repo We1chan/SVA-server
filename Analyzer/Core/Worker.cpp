@@ -84,6 +84,7 @@ namespace SVAAnalyzer
         Control *control = nullptr;
         Analyzer *analyzer = nullptr;
         AvPushStream *pushStream = nullptr;
+        Control *pushControl = nullptr;
         std::thread *alarmThread = nullptr;
         std::thread *encodeThread = nullptr;
         std::queue<Frame *> videoFrameQueue;
@@ -211,6 +212,145 @@ namespace SVAAnalyzer
         return addControlLocked(control, msg);
     }
 
+    bool Worker::updateControlOutput(const std::string &code,
+                                     bool videoEnabled,
+                                     bool liveEventEnabled,
+                                     float wsEventFps,
+                                     const std::string &pushStreamUrl,
+                                     std::string &msg)
+    {
+        WorkerControlRuntime *runtime = nullptr;
+        Control *control = nullptr;
+        Control candidate;
+        {
+            std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
+            auto it = mControlRuntimes.find(code);
+            if (it == mControlRuntimes.end() || !it->second || !it->second->control)
+            {
+                msg = "the control does not exist";
+                return false;
+            }
+            runtime = it->second;
+            control = runtime->control;
+            candidate = *control;
+            if (videoEnabled && pushStreamUrl.empty())
+            {
+                msg = "pushStreamUrl is required when video output is enabled";
+                return false;
+            }
+            if (videoEnabled && control->pushStream && runtime->pushStream &&
+                control->pushStreamUrl == pushStreamUrl)
+            {
+                control->wsEventFps = liveEventEnabled ? wsEventFps : 0.0f;
+                msg = "algorithm video output already enabled";
+                return true;
+            }
+        }
+
+        auto releasePushStream = [&](AvPushStream *stream, std::thread *thread, Control *pushControl) {
+            if (stream)
+            {
+                stream->notifyStop();
+            }
+            if (thread)
+            {
+                if (thread->joinable())
+                {
+                    thread->join();
+                }
+                delete thread;
+            }
+            delete stream;
+            delete pushControl;
+        };
+
+        if (!videoEnabled)
+        {
+            AvPushStream *oldStream = nullptr;
+            std::thread *oldThread = nullptr;
+            Control *oldPushControl = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
+                auto it = mControlRuntimes.find(code);
+                if (it == mControlRuntimes.end() || it->second != runtime)
+                {
+                    msg = "the control does not exist";
+                    return false;
+                }
+                control = runtime->control;
+                oldStream = runtime->pushStream;
+                oldThread = runtime->encodeThread;
+                oldPushControl = runtime->pushControl;
+                runtime->pushStream = nullptr;
+                runtime->encodeThread = nullptr;
+                runtime->pushControl = nullptr;
+                control->wsEventFps = 0.0f;
+                control->pushStream = false;
+                control->pushStreamUrl.clear();
+                control->serverOverlayEnabled = false;
+                control->renderMode = "detect_only";
+            }
+            releasePushStream(oldStream, oldThread, oldPushControl);
+            msg = "algorithm video output disabled";
+            return true;
+        }
+
+        candidate.pushStream = true;
+        candidate.pushStreamUrl = pushStreamUrl;
+        candidate.serverOverlayEnabled = true;
+        candidate.renderMode = "server_overlay";
+        candidate.wsEventFps = liveEventEnabled ? wsEventFps : 0.0f;
+        Control *newPushControl = new Control(candidate);
+        AvPushStream *newStream = new AvPushStream(this, newPushControl);
+        if (!newStream->connect())
+        {
+            releasePushStream(newStream, nullptr, newPushControl);
+            msg = "push stream connect error";
+            return false;
+        }
+        std::thread *newThread = nullptr;
+        if (newPushControl->videoIndex > -1)
+        {
+            newThread = new std::thread(AvPushStream::encodeVideoThread, newStream);
+        }
+
+        AvPushStream *oldStream = nullptr;
+        std::thread *oldThread = nullptr;
+        Control *oldPushControl = nullptr;
+        bool controlStillActive = true;
+        {
+            std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
+            auto it = mControlRuntimes.find(code);
+            if (it == mControlRuntimes.end() || it->second != runtime || runtime->control != control)
+            {
+                controlStillActive = false;
+            }
+            if (controlStillActive)
+            {
+                oldStream = runtime->pushStream;
+                oldThread = runtime->encodeThread;
+                oldPushControl = runtime->pushControl;
+                runtime->pushStream = newStream;
+                runtime->encodeThread = newThread;
+                runtime->pushControl = newPushControl;
+                control->pushStream = true;
+                control->pushStreamUrl = pushStreamUrl;
+                control->serverOverlayEnabled = true;
+                control->renderMode = "server_overlay";
+                control->wsEventFps = candidate.wsEventFps;
+            }
+        }
+        if (!controlStillActive)
+        {
+            releasePushStream(newStream, newThread, newPushControl);
+            msg = "the control does not exist";
+            return false;
+        }
+        releasePushStream(oldStream, oldThread, oldPushControl);
+        msg = "algorithm video output enabled";
+        return true;
+    }
+
     bool Worker::addControlLocked(Control *control, std::string &msg)
     {
         if (!control)
@@ -296,22 +436,22 @@ namespace SVAAnalyzer
         return it == mControlRuntimes.end() ? nullptr : it->second->control;
     }
 
+    bool Worker::getControlSnapshot(const std::string &code, Control &snapshot)
+    {
+        std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
+        auto it = mControlRuntimes.find(code);
+        if (it == mControlRuntimes.end() || !it->second || !it->second->control)
+        {
+            return false;
+        }
+        snapshot = *it->second->control;
+        return true;
+    }
+
     int Worker::getControlCount()
     {
         std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
         return static_cast<int>(mControlRuntimes.size());
-    }
-
-    std::vector<Control *> Worker::snapshotControls()
-    {
-        std::vector<Control *> controls;
-        std::lock_guard<std::mutex> lock(mControlRuntimesMtx);
-        controls.reserve(mControlRuntimes.size());
-        for (const auto &entry : mControlRuntimes)
-        {
-            controls.push_back(entry.second->control);
-        }
-        return controls;
     }
 
     void Worker::generateAlarmThread(void *arg)
@@ -1193,6 +1333,11 @@ namespace SVAAnalyzer
         {
             delete runtime->pushStream;
             runtime->pushStream = nullptr;
+        }
+        if (runtime->pushControl)
+        {
+            delete runtime->pushControl;
+            runtime->pushControl = nullptr;
         }
         if (runtime->analyzer)
         {

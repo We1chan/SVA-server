@@ -391,9 +391,15 @@ namespace SVAAnalyzer
 							 int64_t &postCooldownMaxRemainMs);
 
 		// ApiServer 对应的函数 start
-		int apiControls(std::vector<Control *> &controls);
-		Control *apiControl(std::string &code);
+		int apiControls(std::vector<Control> &controls);
+		bool apiControlSnapshot(const std::string &code, Control &snapshot);
 		void apiControlAdd(Control *control, int &result_code, std::string &result_msg);
+		bool apiControlLiveOutput(const std::string &code,
+			bool videoEnabled,
+			bool liveEventEnabled,
+			float wsEventFps,
+			const std::string &pushStreamUrl,
+			std::string &result_msg);
 		void apiControlCancel(Control *control, int &result_code, std::string &result_msg);
 		// ApiServer 对应的函数 end
 

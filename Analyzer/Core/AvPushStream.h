@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <queue>
 #include <mutex>
+#include <cstdint>
 extern "C"
 {
 #include "libavcodec/avcodec.h"
@@ -46,6 +47,7 @@ namespace SVAAnalyzer
 		Worker *mWorker;
 		Control *mControl;
 		std::atomic<bool> mStopped{false};
+		std::atomic<int64_t> mIoDeadlineMs{0};
 
 		// 视频帧
 		std::queue<Frame *> mVideoFrameQ;
@@ -53,6 +55,7 @@ namespace SVAAnalyzer
 		std::condition_variable mVideoFrameQ_cv;
 		size_t mVideoFrameQCapacity = 32;
 		bool getVideoFrame(Frame *&frame);
+		static int ioInterruptCallback(void *opaque);
 	};
 
 }

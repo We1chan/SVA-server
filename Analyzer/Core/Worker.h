@@ -94,10 +94,16 @@ namespace SVAAnalyzer
 	public:
 		bool start(std::string &msg);
 		bool addControl(Control *control, std::string &msg);
+		bool updateControlOutput(const std::string &code,
+			bool videoEnabled,
+			bool liveEventEnabled,
+			float wsEventFps,
+			const std::string &pushStreamUrl,
+			std::string &msg);
 		bool removeControl(const std::string &code);
 		Control *getControl(const std::string &code);
+		bool getControlSnapshot(const std::string &code, Control &snapshot);
 		int getControlCount();
-		std::vector<Control *> snapshotControls();
 		bool getState();
 		void setState(bool state);
 		void remove();

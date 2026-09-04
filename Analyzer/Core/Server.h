@@ -15,6 +15,7 @@ void api_health(struct evhttp_request *req, void *arg);
 void api_controls(struct evhttp_request *req, void *arg);
 void api_control(struct evhttp_request *req, void *arg);
 void api_control_add(struct evhttp_request *req, void *arg);
+void api_control_live_output(struct evhttp_request *req, void *arg);
 void api_control_cancel(struct evhttp_request *req, void *arg);
 void api_alarm_bind_media(struct evhttp_request *req, void *arg);
 void parse_get(struct evhttp_request *req, struct evkeyvalq *params);

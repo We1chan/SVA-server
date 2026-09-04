@@ -14,6 +14,7 @@
 #include <json/value.h>
 #include <thread>
 #include "Control.h"
+#include "LiveOutput.h"
 #include "Config.h"
 #include "Scheduler.h"
 #include "Utils/Log.h"
@@ -134,6 +135,7 @@ void Server::start(void *arg)
                     evhttp_set_cb(http, "/api/controls", api_controls, scheduler);
                     evhttp_set_cb(http, "/api/control", api_control, scheduler);
                     evhttp_set_cb(http, "/api/control/add", api_control_add, scheduler);
+                    evhttp_set_cb(http, "/api/control/live-output", api_control_live_output, scheduler);
                     evhttp_set_cb(http, "/api/control/cancel", api_control_cancel, scheduler);
                     evhttp_set_cb(http, "/api/alarm/bind-media", api_alarm_bind_media, scheduler);
 
@@ -169,6 +171,7 @@ void api_index(struct evhttp_request *req, void *arg)
     result_urls["/api/controls"] = "get all control being analyzed";
     result_urls["/api/control"] = "get control being analyzed";
     result_urls["/api/control/add"] = "add control";
+    result_urls["/api/control/live-output"] = "enable or disable algorithm video output";
     result_urls["/api/control/cancel"] = "cancel control";
     result_urls["/api/alarm/bind-media"] = "bind backend alarm metadata to generated media";
     result_urls["/api/largeModelCalcu"] = "largeModelCalcu";
@@ -284,7 +287,7 @@ void api_controls(struct evhttp_request *req, void *arg)
     if (reader->parse(buf, buf + std::strlen(buf), &root, &errs) && errs.empty())
     {
 
-        std::vector<Control *> controls;
+        std::vector<Control> controls;
         int len = scheduler->apiControls(controls);
 
         if (len > 0)
@@ -293,36 +296,36 @@ void api_controls(struct evhttp_request *req, void *arg)
             int64_t startTimestamp = 0;
             for (size_t i = 0; i < controls.size(); ++i)
             {
-                startTimestamp = controls[i]->startTimestamp;
+                startTimestamp = controls[i].startTimestamp;
 
-                result_data_item["code"] = controls[i]->code.data();
-                result_data_item["streamUrl"] = controls[i]->streamUrl.data();
+                result_data_item["code"] = controls[i].code.data();
+                result_data_item["streamUrl"] = controls[i].streamUrl.data();
 
-                result_data_item["pushStream"] = controls[i]->pushStream;
-                result_data_item["pushStreamUrl"] = controls[i]->pushStreamUrl.data();
-                result_data_item["renderMode"] = controls[i]->renderMode.data();
-                result_data_item["serverOverlayEnabled"] = controls[i]->serverOverlayEnabled;
-                result_data_item["wsOverlayEnabled"] = controls[i]->wsOverlayEnabled;
-                result_data_item["wsEventFps"] = controls[i]->wsEventFps;
-                result_data_item["wsEventKeyMode"] = controls[i]->wsEventKeyMode;
-                result_data_item["wsEventUpdateIntervalMs"] = controls[i]->wsEventUpdateIntervalMs;
-                result_data_item["wsEventEndTimeoutMs"] = controls[i]->wsEventEndTimeoutMs;
-                result_data_item["wsEventRuleMode"] = controls[i]->wsEventRuleMode;
-                result_data_item["wsEventRequiredAlgorithms"] = controls[i]->wsEventRequiredAlgorithmsStr;
-                result_data_item["wsEventMinHits"] = controls[i]->wsEventMinHits;
-                result_data_item["wsEventHitWindowMs"] = controls[i]->wsEventHitWindowMs;
-                result_data_item["wsEventPendingTimeoutMs"] = controls[i]->wsEventPendingTimeoutMs;
-                result_data_item["wsEventRestartCooldownMs"] = controls[i]->wsEventRestartCooldownMs;
-                result_data_item["wsFrameDebounceMs"] = controls[i]->wsFrameDebounceMs;
-                result_data_item["wsPostRetryMax"] = controls[i]->wsPostRetryMax;
-                result_data_item["wsPostFailOpenThreshold"] = controls[i]->wsPostFailOpenThreshold;
-                result_data_item["wsPostCooldownMs"] = controls[i]->wsPostCooldownMs;
-                result_data_item["algorithmCode"] = controls[i]->algorithmCode.data();
-                result_data_item["objectCode"] = controls[i]->objectCode.data();
-                result_data_item["recognitionRegion"] = controls[i]->recognitionRegion.data();
+                result_data_item["pushStream"] = controls[i].pushStream;
+                result_data_item["pushStreamUrl"] = controls[i].pushStreamUrl.data();
+                result_data_item["renderMode"] = controls[i].renderMode.data();
+                result_data_item["serverOverlayEnabled"] = controls[i].serverOverlayEnabled;
+                result_data_item["wsOverlayEnabled"] = controls[i].wsOverlayEnabled;
+                result_data_item["wsEventFps"] = controls[i].wsEventFps;
+                result_data_item["wsEventKeyMode"] = controls[i].wsEventKeyMode;
+                result_data_item["wsEventUpdateIntervalMs"] = controls[i].wsEventUpdateIntervalMs;
+                result_data_item["wsEventEndTimeoutMs"] = controls[i].wsEventEndTimeoutMs;
+                result_data_item["wsEventRuleMode"] = controls[i].wsEventRuleMode;
+                result_data_item["wsEventRequiredAlgorithms"] = controls[i].wsEventRequiredAlgorithmsStr;
+                result_data_item["wsEventMinHits"] = controls[i].wsEventMinHits;
+                result_data_item["wsEventHitWindowMs"] = controls[i].wsEventHitWindowMs;
+                result_data_item["wsEventPendingTimeoutMs"] = controls[i].wsEventPendingTimeoutMs;
+                result_data_item["wsEventRestartCooldownMs"] = controls[i].wsEventRestartCooldownMs;
+                result_data_item["wsFrameDebounceMs"] = controls[i].wsFrameDebounceMs;
+                result_data_item["wsPostRetryMax"] = controls[i].wsPostRetryMax;
+                result_data_item["wsPostFailOpenThreshold"] = controls[i].wsPostFailOpenThreshold;
+                result_data_item["wsPostCooldownMs"] = controls[i].wsPostCooldownMs;
+                result_data_item["algorithmCode"] = controls[i].algorithmCode.data();
+                result_data_item["objectCode"] = controls[i].objectCode.data();
+                result_data_item["recognitionRegion"] = controls[i].recognitionRegion.data();
 
-                result_data_item["checkFps"] = controls[i]->checkFps;
-                result_data_item["detectFps"] = controls[i]->detectFps;
+                result_data_item["checkFps"] = controls[i].checkFps;
+                result_data_item["detectFps"] = controls[i].detectFps;
                 result_data_item["startTimestamp"] = startTimestamp;
                 result_data_item["liveMilliseconds"] = curTimestamp - startTimestamp;
 
@@ -370,18 +373,19 @@ void api_control(struct evhttp_request *req, void *arg)
     if (reader->parse(buf, buf + std::strlen(buf), &root, &errs) && errs.empty())
     {
 
-        Control *control = NULL;
+        Control controlSnapshot;
+        bool hasControl = false;
         if (root["code"].isString())
         {
             std::string code = root["code"].asCString();
-            control = scheduler->apiControl(code);
+            hasControl = scheduler->apiControlSnapshot(code, controlSnapshot);
         }
 
-        if (control)
+        if (hasControl)
         {
-            result_control["code"] = control->code;
-            result_control["checkFps"] = control->checkFps;
-            result_control["detectFps"] = control->detectFps;
+            result_control["code"] = controlSnapshot.code;
+            result_control["checkFps"] = controlSnapshot.checkFps;
+            result_control["detectFps"] = controlSnapshot.detectFps;
 
             result_code = 1000;
             result_msg = "success";
@@ -929,6 +933,65 @@ void api_control_add(struct evhttp_request *req, void *arg)
     struct evbuffer *buff = evbuffer_new();
     evbuffer_add_printf(buff, "%s", result.toStyledString().c_str());
     evhttp_send_reply(req, HTTP_OK, nullptr, buff);
+    evbuffer_free(buff);
+}
+
+void api_control_live_output(struct evhttp_request *req, void *arg)
+{
+    Scheduler *scheduler = (Scheduler *)arg;
+    char buf[RECV_BUF_MAX_SIZE];
+    parse_post(req, buf);
+
+    Json::CharReaderBuilder builder;
+    const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+    Json::Value root;
+    JSONCPP_STRING errs;
+    LiveOutputRequest request;
+    std::string result_msg;
+    int result_code = 0;
+    int http_status = HTTP_OK;
+
+    if (!reader->parse(buf, buf + std::strlen(buf), &root, &errs) || !errs.empty())
+    {
+        result_msg = "invalid request parameter";
+        http_status = HTTP_BADREQUEST;
+    }
+    else if (!parseLiveOutputRequest(root, request, result_msg))
+    {
+        http_status = HTTP_BADREQUEST;
+    }
+    else if (!scheduler)
+    {
+        result_msg = "scheduler unavailable";
+        http_status = HTTP_INTERNAL;
+    }
+    else if (scheduler->apiControlLiveOutput(request.controlCode,
+                                               request.videoEnabled,
+                                               request.liveEventEnabled,
+                                               request.wsEventFps,
+                                               request.pushStreamUrl,
+                                               result_msg))
+    {
+        result_code = 1000;
+    }
+    else
+    {
+        http_status = HTTP_INTERNAL;
+    }
+
+    Json::Value result;
+    result["code"] = result_code;
+    result["msg"] = result_msg;
+    result["controlCode"] = request.controlCode;
+    result["videoEnabled"] = request.videoEnabled;
+    result["liveEventEnabled"] = request.liveEventEnabled;
+
+    LOGI("\\n \\t live-output request:%s \\n \\t response:%s",
+         root.toStyledString().data(), result.toStyledString().data());
+
+    struct evbuffer *buff = evbuffer_new();
+    evbuffer_add_printf(buff, "%s", result.toStyledString().c_str());
+    evhttp_send_reply(req, http_status, nullptr, buff);
     evbuffer_free(buff);
 }
 
